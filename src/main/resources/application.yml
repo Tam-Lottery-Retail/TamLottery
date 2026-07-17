@@ -1,0 +1,50 @@
+spring:
+  application:
+    name: tam-lottery-backend
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/tam_lottery?createDatabaseIfNotExist=true&useUnicode=true&characterEncoding=utf8&serverTimezone=UTC}
+    username: ${DB_USERNAME:tam_lottery}
+    password: ${DB_PASSWORD:tam_lottery}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+    properties:
+      hibernate:
+        jdbc:
+          time_zone: UTC
+  flyway:
+    enabled: true
+  jackson:
+    time-zone: UTC
+  mvc:
+    problemdetails:
+      enabled: true
+
+server:
+  port: ${SERVER_PORT:8080}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+
+app:
+  security:
+    jwt:
+      issuer: tam-lottery-backend
+      secret: ${JWT_SECRET:}
+      access-token-ttl: PT15M
+      refresh-token-ttl: P30D
+  bootstrap:
+    enabled: ${BOOTSTRAP_ENABLED:false}
+    store-code: ${BOOTSTRAP_STORE_CODE:}
+    store-name: ${BOOTSTRAP_STORE_NAME:}
+    owner-username: ${BOOTSTRAP_OWNER_USERNAME:}
+    owner-password: ${BOOTSTRAP_OWNER_PASSWORD:}
+    owner-full-name: ${BOOTSTRAP_OWNER_FULL_NAME:}

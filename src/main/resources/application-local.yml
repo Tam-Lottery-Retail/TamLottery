@@ -1,0 +1,10 @@
+spring:
+  config:
+    activate:
+      on-profile: local
+
+app:
+  security:
+    jwt:
+      secret: ${JWT_SECRET:VGhpcy1pcy1hLWxvY2FsLWRldmVsb3BtZW50LXNlY3JldC10aGF0LW11c3QtYmUtY2hhbmdlZA==}
+

@@ -1,0 +1,15 @@
+spring:
+  flyway:
+    enabled: true
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+
+app:
+  security:
+    jwt:
+      secret: VGVzdC1vbmx5LXNlY3JldC1mb3ItdGFtLWxvdHRlcnktYmFja2VuZC0yNTYtYml0cw==
+  bootstrap:
+    enabled: false
+
