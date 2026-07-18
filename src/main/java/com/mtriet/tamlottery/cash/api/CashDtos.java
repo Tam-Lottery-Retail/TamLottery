@@ -4,8 +4,8 @@ import com.mtriet.tamlottery.cash.domain.CashDirection;
 import com.mtriet.tamlottery.cash.domain.CashTransactionStatus;
 import com.mtriet.tamlottery.cash.domain.CashTransactionType;
 import com.mtriet.tamlottery.cash.domain.PaymentMethod;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotNull;
-import jakarta.validation.constraints.Positive;
 import jakarta.validation.constraints.Size;
 
 import java.time.Instant;
@@ -21,7 +21,7 @@ public final class CashDtos {
             @NotNull CashDirection direction,
             @NotNull CashTransactionType transactionType,
             @NotNull PaymentMethod paymentMethod,
-            @Positive long amount,
+            @Min(10_000) long amount,
             @NotNull Instant occurredAt,
             @Size(max = 500) String note) {
     }

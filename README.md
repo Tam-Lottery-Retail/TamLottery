@@ -121,6 +121,8 @@ Difference = actual received - expected revenue
 
 `SELLER_TO_STORE` chỉ chuyển tồn từ seller về cửa hàng. Chỉ `STORE_TO_AGENCY` mới làm giảm tổng vé của cửa hàng.
 
+`STORE_TO_AGENCY` chỉ được tạo và xác nhận trước thời điểm `returnCutoffAt` do đại lý cấp 1 quy định. Seller vẫn có thể trả vé về cửa hàng sau mốc này, nhưng cửa hàng không thể chuyển số vé đó tiếp về đại lý.
+
 ## Screenshot
 
 ### Dashboard owner
@@ -189,6 +191,8 @@ Compose chỉ chạy backend và frontend; không tạo MySQL local. Không comm
 | Frontend | `http://localhost:3000` |
 | Backend | `http://localhost:8080` hoặc `APP_PORT` trong `.env` |
 | Healthcheck | `GET /actuator/health` |
+| Swagger UI | `GET /swagger-ui.html` |
+| OpenAPI JSON | `GET /v3/api-docs` |
 
 ## Chạy backend local
 

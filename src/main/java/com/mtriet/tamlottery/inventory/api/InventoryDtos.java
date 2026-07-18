@@ -56,6 +56,7 @@ public final class InventoryDtos {
             LocalDate drawDate,
             Instant returnCutoffAt,
             int quantityReceived,
+            long storeAvailableQuantity,
             long unitCost,
             long unitSalePrice,
             String serialFrom,
