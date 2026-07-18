@@ -44,6 +44,7 @@ public class CashService {
     @Transactional
     public CashDtos.CashTransactionResponse create(CashDtos.CreateCashTransactionRequest request) {
         CurrentUser current = currentUserProvider.get();
+        validateAmount(request.amount());
         validateDirection(request.transactionType(), request.direction());
         Long sellerId = request.sellerId();
         if (sellerOnly(current)) {
@@ -118,6 +119,15 @@ public class CashService {
         }
     }
 
+    private void validateAmount(long amount) {
+        if (amount < 10_000) {
+            throw BusinessException.invalid(ErrorCode.INVALID_REQUEST, "Cash transaction amount must be at least 10000");
+        }
+        if (amount % 10 != 0) {
+            throw BusinessException.invalid(ErrorCode.INVALID_REQUEST, "Cash transaction amount must be divisible by 10");
+        }
+    }
+
     private boolean sellerOnly(CurrentUser current) {
         return current.hasRole(Role.SELLER) && !current.hasRole(Role.OWNER) && !current.hasRole(Role.MANAGER);
     }
@@ -138,4 +148,3 @@ public class CashService {
                 transaction.getPostedAt());
     }
 }
-

@@ -1,0 +1,12 @@
+app:
+  bootstrap:
+    enabled: false
+  demo:
+    enabled: true
+    exit-after-seed: true
+    store-code: ${DEMO_STORE_CODE:DEMO-V01}
+    store-name: ${DEMO_STORE_NAME:Tâm Lottery Demo}
+    owner-username: ${DEMO_OWNER_USERNAME:demo.owner.v01}
+    owner-password: ${DEMO_OWNER_PASSWORD:Demo@12345}
+    seller-username: ${DEMO_SELLER_USERNAME:demo.seller.v01}
+    seller-password: ${DEMO_SELLER_PASSWORD:Demo@12345}

@@ -86,8 +86,11 @@ public class LotteryDraw extends BaseEntity {
         return returnCutoffAt;
     }
 
+    public boolean acceptsAgencyReturnsAt(Instant instant) {
+        return instant.isBefore(returnCutoffAt);
+    }
+
     public LotteryDrawStatus getStatus() {
         return status;
     }
 }
-

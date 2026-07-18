@@ -1,0 +1,3 @@
+agencyCode,receiptCode,businessDate,receivedAt,note,issuerName,provinceCode,region,drawDate,returnCutoffAt,quantityReceived,unitCost,unitSalePrice,serialFrom,serialTo
+DL001,PN-2026-001,2026-07-18,2026-07-18T08:00:00+07:00,Lô vé buổi sáng,XSKT TP.HCM,HCM,SOUTH,2026-07-18,2026-07-18T15:30:00+07:00,100,9000,10000,000001,000100
+DL001,PN-2026-001,2026-07-18,2026-07-18T08:00:00+07:00,Lô vé buổi sáng,XSKT Long An,LA,SOUTH,2026-07-18,2026-07-18T15:30:00+07:00,100,9000,10000,100001,100100

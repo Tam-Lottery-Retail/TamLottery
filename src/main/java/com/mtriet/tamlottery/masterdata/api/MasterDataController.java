@@ -47,17 +47,4 @@ public class MasterDataController {
         return masterDataService.listDraws(pageable);
     }
 
-    @PostMapping("/draws")
-    @PreAuthorize("hasAnyRole('OWNER','MANAGER')")
-    MasterDataDtos.LotteryDrawResponse createDraw(@Valid @RequestBody MasterDataDtos.CreateLotteryDrawRequest request) {
-        return masterDataService.createDraw(request);
-    }
-
-    @PatchMapping("/draws/{id}/status")
-    @PreAuthorize("hasAnyRole('OWNER','MANAGER')")
-    MasterDataDtos.LotteryDrawResponse changeDrawStatus(@PathVariable Long id,
-                                                        @Valid @RequestBody MasterDataDtos.ChangeLotteryDrawStatusRequest request) {
-        return masterDataService.changeDrawStatus(id, request);
-    }
 }
-

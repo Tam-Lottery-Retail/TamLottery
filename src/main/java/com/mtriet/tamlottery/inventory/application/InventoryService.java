@@ -44,6 +44,7 @@ import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -51,6 +52,8 @@ import java.util.Set;
 
 @Service
 public class InventoryService {
+
+    private static final ZoneId STORE_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
 
     private final StoreRepository storeRepository;
     private final SellerRepository sellerRepository;
@@ -101,7 +104,7 @@ public class InventoryService {
         Agency agency = requireAgency(request.agencyId(), storeId);
         LotteryBatch batch = new LotteryBatch(
                 store, agency, request.receiptCode(), request.businessDate(), request.receivedAt(), request.note());
-        buildBatchLines(request.lines(), storeId).forEach(batch::addLine);
+        buildBatchLines(request.lines(), store, request.receivedAt()).forEach(batch::addLine);
         return toBatchResponse(batchRepository.save(batch));
     }
 
@@ -120,7 +123,7 @@ public class InventoryService {
                 request.businessDate(),
                 request.receivedAt(),
                 request.note(),
-                buildBatchLines(request.lines(), storeId));
+                buildBatchLines(request.lines(), batch.getStore(), request.receivedAt()));
         return toBatchResponse(batch);
     }
 
@@ -166,6 +169,12 @@ public class InventoryService {
         ensureUnique(request.lines().stream().map(InventoryDtos.AllocationLineRequest::batchLineId).toList(), "batchLineId");
         for (InventoryDtos.AllocationLineRequest lineRequest : request.lines()) {
             LotteryBatchLine line = requireConfirmedBatchLine(lineRequest.batchLineId(), storeId);
+            long available = availabilityService.storeAvailable(line);
+            if (lineRequest.quantity() > available) {
+                throw BusinessException.invalid(
+                        ErrorCode.INVENTORY_NOT_ENOUGH,
+                        "Batch line %d has only %d tickets available".formatted(line.getId(), available));
+            }
             allocation.addLine(new TicketAllocationLine(line, lineRequest.quantity()));
         }
         return toAllocationResponse(allocationRepository.save(allocation));
@@ -210,7 +219,11 @@ public class InventoryService {
 
     @Transactional(readOnly = true)
     public Page<InventoryDtos.AllocationResponse> listAllocations(Pageable pageable) {
-        return allocationRepository.findAllByStoreId(currentUserProvider.get().storeId(), pageable)
+        CurrentUser current = currentUserProvider.get();
+        requireLinkedSeller(current);
+        return (sellerOnly(current)
+                ? allocationRepository.findAllByStoreIdAndSellerId(current.storeId(), current.sellerId(), pageable)
+                : allocationRepository.findAllByStoreId(current.storeId(), pageable))
                 .map(this::toAllocationResponse);
     }
 
@@ -234,6 +247,7 @@ public class InventoryService {
         Agency agency = request.agencyId() == null ? null : requireAgency(request.agencyId(), current.storeId());
         TicketReturn ticketReturn = new TicketReturn(
                 store, request.returnType(), seller, agency, request.businessDate(), request.note());
+        Instant now = Instant.now();
         ensureUnique(request.lines().stream().map(line -> line.batchLineId() + ":" + line.allocationLineId()).toList(), "return line");
 
         for (InventoryDtos.ReturnLineRequest lineRequest : request.lines()) {
@@ -247,6 +261,7 @@ public class InventoryService {
                 if (!batchLine.getBatch().getAgency().getId().equals(agency.getId())) {
                     throw BusinessException.invalid(ErrorCode.INVALID_RETURN_PARTIES, "Agency does not own the selected batch line");
                 }
+                requireAgencyReturnOpen(batchLine, now);
             }
             ticketReturn.addLine(new TicketReturnLine(batchLine, allocationLine, lineRequest.quantity()));
         }
@@ -259,6 +274,7 @@ public class InventoryService {
         TicketReturn ticketReturn = returnRepository.findForUpdate(id, current.storeId())
                 .orElseThrow(() -> BusinessException.notFound("Ticket return not found"));
         requireState(ticketReturn.getStatus() == TicketReturnStatus.DRAFT, "Only a draft return can be confirmed");
+        Instant confirmedAt = Instant.now();
 
         List<Long> batchLineIds = ticketReturn.getLines().stream().map(line -> line.getBatchLine().getId()).distinct().sorted().toList();
         batchLineRepository.findAllForUpdate(batchLineIds, current.storeId());
@@ -283,6 +299,7 @@ public class InventoryService {
                 if (line.getBatchLine().getBatch().getStatus() != LotteryBatchStatus.CONFIRMED) {
                     throw BusinessException.conflict(ErrorCode.INVALID_STATE, "Batch is no longer open for agency returns");
                 }
+                requireAgencyReturnOpen(line.getBatchLine(), confirmedAt);
                 long available = availabilityService.storeAvailable(line.getBatchLine());
                 if (line.getQuantity() > available) {
                     throw BusinessException.invalid(
@@ -291,7 +308,7 @@ public class InventoryService {
                 }
             }
         }
-        ticketReturn.confirm(current.userId(), Instant.now());
+        ticketReturn.confirm(current.userId(), confirmedAt);
         return toReturnResponse(ticketReturn);
     }
 
@@ -309,7 +326,12 @@ public class InventoryService {
 
     @Transactional(readOnly = true)
     public Page<InventoryDtos.ReturnResponse> listReturns(Pageable pageable) {
-        return returnRepository.findAllByStoreId(currentUserProvider.get().storeId(), pageable).map(this::toReturnResponse);
+        CurrentUser current = currentUserProvider.get();
+        requireLinkedSeller(current);
+        return (sellerOnly(current)
+                ? returnRepository.findAllByStoreIdAndSellerId(current.storeId(), current.sellerId(), pageable)
+                : returnRepository.findAllByStoreId(current.storeId(), pageable))
+                .map(this::toReturnResponse);
     }
 
     @Transactional(readOnly = true)
@@ -403,15 +425,29 @@ public class InventoryService {
 
     @Transactional(readOnly = true)
     public Page<InventoryDtos.AdjustmentResponse> listAdjustments(Pageable pageable) {
-        return adjustmentRepository.findAllByStoreId(currentUserProvider.get().storeId(), pageable)
+        CurrentUser current = currentUserProvider.get();
+        requireLinkedSeller(current);
+        return (sellerOnly(current)
+                ? adjustmentRepository.findAllByStoreIdAndSellerId(current.storeId(), current.sellerId(), pageable)
+                : adjustmentRepository.findAllByStoreId(current.storeId(), pageable))
                 .map(this::toAdjustmentResponse);
     }
 
-    private List<LotteryBatchLine> buildBatchLines(List<InventoryDtos.BatchLineRequest> requests, Long storeId) {
+    private List<LotteryBatchLine> buildBatchLines(List<InventoryDtos.BatchLineRequest> requests,
+                                                    Store store,
+                                                    Instant receivedAt) {
         List<LotteryBatchLine> lines = new ArrayList<>();
         for (InventoryDtos.BatchLineRequest request : requests) {
-            LotteryDraw draw = drawRepository.findByIdAndStoreId(request.drawId(), storeId)
-                    .orElseThrow(() -> BusinessException.notFound("Lottery draw not found"));
+            validateReturnCutoff(receivedAt, request);
+            LotteryDraw draw = drawRepository.findByStoreIdAndProvinceCodeIgnoreCaseAndDrawDate(
+                            store.getId(), request.provinceCode(), request.drawDate())
+                    .orElseGet(() -> drawRepository.save(new LotteryDraw(
+                            store,
+                            request.issuerName(),
+                            request.provinceCode(),
+                            request.region(),
+                            request.drawDate(),
+                            request.returnCutoffAt())));
             if (draw.getStatus() != LotteryDrawStatus.OPEN) {
                 throw BusinessException.invalid(ErrorCode.INVALID_STATE, "Lottery draw is not open");
             }
@@ -424,6 +460,29 @@ public class InventoryService {
                     request.serialTo()));
         }
         return lines;
+    }
+
+    private void validateReturnCutoff(Instant receivedAt, InventoryDtos.BatchLineRequest request) {
+        if (!request.returnCutoffAt().isAfter(receivedAt)) {
+            throw BusinessException.invalid(
+                    ErrorCode.INVALID_REQUEST,
+                    "Agency return deadline must be after the batch receipt time");
+        }
+        if (request.returnCutoffAt().atZone(STORE_ZONE).toLocalDate().isAfter(request.drawDate())) {
+            throw BusinessException.invalid(
+                    ErrorCode.INVALID_REQUEST,
+                    "Agency return deadline cannot be after the draw date");
+        }
+    }
+
+    private void requireAgencyReturnOpen(LotteryBatchLine batchLine, Instant instant) {
+        if (!batchLine.getDraw().acceptsAgencyReturnsAt(instant)) {
+            throw BusinessException.conflict(
+                    ErrorCode.RETURN_CUTOFF_EXPIRED,
+                    "Agency return deadline has passed for %s on %s".formatted(
+                            batchLine.getDraw().getProvinceCode(),
+                            batchLine.getDraw().getDrawDate()));
+        }
     }
 
     private Agency requireAgency(Long id, Long storeId) {
@@ -498,6 +557,13 @@ public class InventoryService {
         return current.hasRole(Role.SELLER) && !current.hasRole(Role.OWNER) && !current.hasRole(Role.MANAGER);
     }
 
+    private void requireLinkedSeller(CurrentUser current) {
+        if (sellerOnly(current) && current.sellerId() == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, org.springframework.http.HttpStatus.FORBIDDEN,
+                    "User has no seller profile");
+        }
+    }
+
     private void requireState(boolean valid, String message) {
         if (!valid) {
             throw BusinessException.conflict(ErrorCode.INVALID_STATE, message);
@@ -513,16 +579,25 @@ public class InventoryService {
 
     private InventoryDtos.BatchResponse toBatchResponse(LotteryBatch batch) {
         List<InventoryDtos.BatchLineResponse> lines = batch.getLines().stream()
-                .map(line -> new InventoryDtos.BatchLineResponse(
-                        line.getId(),
-                        line.getDraw().getId(),
-                        line.getDraw().getProvinceCode(),
-                        line.getDraw().getDrawDate(),
-                        line.getQuantityReceived(),
-                        line.getUnitCost(),
-                        line.getUnitSalePrice(),
-                        line.getSerialFrom(),
-                        line.getSerialTo()))
+                .map(line -> {
+                    long storeAvailable = batch.getStatus() == LotteryBatchStatus.CONFIRMED
+                            ? availabilityService.storeAvailable(line)
+                            : 0;
+                    return new InventoryDtos.BatchLineResponse(
+                            line.getId(),
+                            line.getDraw().getId(),
+                            line.getDraw().getIssuerName(),
+                            line.getDraw().getProvinceCode(),
+                            line.getDraw().getRegion(),
+                            line.getDraw().getDrawDate(),
+                            line.getDraw().getReturnCutoffAt(),
+                            line.getQuantityReceived(),
+                            storeAvailable,
+                            line.getUnitCost(),
+                            line.getUnitSalePrice(),
+                            line.getSerialFrom(),
+                            line.getSerialTo());
+                })
                 .toList();
         return new InventoryDtos.BatchResponse(
                 batch.getId(),

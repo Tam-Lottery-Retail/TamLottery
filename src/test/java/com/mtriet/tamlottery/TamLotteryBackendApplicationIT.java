@@ -9,11 +9,15 @@ import com.mtriet.tamlottery.cash.domain.PaymentMethod;
 import com.mtriet.tamlottery.common.exception.BusinessException;
 import com.mtriet.tamlottery.common.exception.ErrorCode;
 import com.mtriet.tamlottery.identity.api.AuthDtos;
+import com.mtriet.tamlottery.identity.api.IdentityDtos;
 import com.mtriet.tamlottery.identity.application.AuthService;
+import com.mtriet.tamlottery.identity.application.IdentityService;
 import com.mtriet.tamlottery.identity.domain.Role;
 import com.mtriet.tamlottery.identity.domain.Seller;
+import com.mtriet.tamlottery.identity.domain.SellerStatus;
 import com.mtriet.tamlottery.identity.domain.Store;
 import com.mtriet.tamlottery.identity.domain.UserAccount;
+import com.mtriet.tamlottery.identity.domain.UserStatus;
 import com.mtriet.tamlottery.identity.infrastructure.SellerRepository;
 import com.mtriet.tamlottery.identity.infrastructure.StoreRepository;
 import com.mtriet.tamlottery.identity.infrastructure.UserAccountRepository;
@@ -24,6 +28,7 @@ import com.mtriet.tamlottery.inventory.domain.InventoryAdjustmentType;
 import com.mtriet.tamlottery.inventory.domain.InventoryHolderType;
 import com.mtriet.tamlottery.inventory.domain.LotteryBatchStatus;
 import com.mtriet.tamlottery.inventory.domain.TicketAllocationStatus;
+import com.mtriet.tamlottery.inventory.domain.TicketReturnStatus;
 import com.mtriet.tamlottery.inventory.domain.TicketReturnType;
 import com.mtriet.tamlottery.masterdata.api.MasterDataDtos;
 import com.mtriet.tamlottery.masterdata.application.MasterDataService;
@@ -38,6 +43,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -53,6 +59,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.time.ZoneId;
 import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.List;
@@ -77,7 +84,8 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 class TamLotteryBackendApplicationIT {
 
     private static final String TEST_PASSWORD = "StrongPass123!";
-    private static final LocalDate BUSINESS_DATE = LocalDate.of(2026, 7, 17);
+    private static final ZoneId STORE_ZONE = ZoneId.of("Asia/Ho_Chi_Minh");
+    private static final LocalDate BUSINESS_DATE = LocalDate.now(STORE_ZONE).plusDays(1);
     private static final AtomicInteger SEQUENCE = new AtomicInteger();
 
     @Container
@@ -101,6 +109,9 @@ class TamLotteryBackendApplicationIT {
 
     @Autowired
     private AuthService authService;
+
+    @Autowired
+    private IdentityService identityService;
 
     @Autowired
     private MasterDataService masterDataService;
@@ -128,6 +139,183 @@ class TamLotteryBackendApplicationIT {
     }
 
     @Test
+    void exposesSwaggerAndOpenApiWithoutAuthentication() throws Exception {
+        mockMvc.perform(get("/v3/api-docs"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.info.title").value("Tâm Lottery API"))
+                .andExpect(jsonPath("$.components.securitySchemes.bearerAuth.type").value("http"))
+                .andExpect(jsonPath("$.components.securitySchemes.bearerAuth.scheme").value("bearer"));
+        mockMvc.perform(get("/swagger-ui.html"))
+                .andExpect(status().is3xxRedirection());
+    }
+
+    @Test
+    void validatesMinimumAndIncrementForCashTransactionAmount() {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+
+        assertThatThrownBy(() -> createCashTransaction(9_990))
+                .isInstanceOfSatisfying(BusinessException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.INVALID_REQUEST);
+                    assertThat(exception.getStatus().value()).isEqualTo(422);
+                });
+        assertThatThrownBy(() -> createCashTransaction(10_001))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.INVALID_REQUEST));
+
+        CashDtos.CashTransactionResponse transaction = createCashTransaction(500_000);
+        assertThat(transaction.amount()).isEqualTo(500_000);
+    }
+
+    @Test
+    void restoresStoreInventoryAfterSellerReturnAndAllowsDraftAllocationCancellation() {
+        Actor owner = createActor(Role.OWNER);
+        SellerActor sellerActor = createSellerActor(owner);
+        authenticate(owner, null);
+        InventoryScenario inventory = createInventoryScenario(owner, BUSINESS_DATE.plusDays(4), 100);
+
+        InventoryDtos.AllocationResponse allocation = inventoryService.issueAllocation(
+                createAllocation(sellerActor.seller(), inventory, 50).id());
+        assertThat(inventoryService.getBatch(inventory.batchId()).lines().getFirst().storeAvailableQuantity())
+                .isEqualTo(50);
+
+        authenticate(sellerActor.actor(), sellerActor.seller());
+        InventoryDtos.ReturnResponse sellerReturn = inventoryService.createReturn(new InventoryDtos.ReturnRequest(
+                TicketReturnType.SELLER_TO_STORE,
+                sellerActor.seller().getId(),
+                null,
+                inventory.businessDate(),
+                "Trả lại vé chưa bán",
+                List.of(new InventoryDtos.ReturnLineRequest(
+                        inventory.batchLineId(), allocation.lines().getFirst().id(), 30))));
+
+        authenticate(owner, null);
+        inventoryService.confirmReturn(sellerReturn.id());
+        assertThat(inventoryService.getBatch(inventory.batchId()).lines().getFirst().storeAvailableQuantity())
+                .isEqualTo(80);
+
+        assertThatThrownBy(() -> createAllocation(sellerActor.seller(), inventory, 81))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.INVENTORY_NOT_ENOUGH));
+
+        InventoryDtos.AllocationResponse draft = createAllocation(sellerActor.seller(), inventory, 80);
+        inventoryService.cancelAllocation(draft.id());
+        assertThat(inventoryService.getAllocation(draft.id()).status()).isEqualTo(TicketAllocationStatus.CANCELLED);
+        assertThat(inventoryService.getBatch(inventory.batchId()).lines().getFirst().storeAvailableQuantity())
+                .isEqualTo(80);
+    }
+
+    @Test
+    void recordsAndReusesDrawReferenceWhenReceivingBatch() {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+        int sequence = SEQUENCE.incrementAndGet();
+        MasterDataDtos.AgencyResponse agency = masterDataService.createAgency(new MasterDataDtos.CreateAgencyRequest(
+                "AG-AUTO-" + sequence, "Đại lý tự động " + sequence, null, null));
+        InventoryDtos.BatchLineRequest line = new InventoryDtos.BatchLineRequest(
+                "XSKT TP.HCM", "HCM", LotteryRegion.SOUTH, BUSINESS_DATE,
+                BUSINESS_DATE.atTime(15, 30).toInstant(ZoneOffset.UTC), 50, 9_000, 10_000, null, null);
+
+        InventoryDtos.BatchResponse batch = inventoryService.createBatch(new InventoryDtos.BatchRequest(
+                agency.id(), "AUTO-" + sequence, BUSINESS_DATE, Instant.now(), null, List.of(line, line)));
+
+        assertThat(batch.lines()).hasSize(2);
+        assertThat(batch.lines().get(0).drawId()).isEqualTo(batch.lines().get(1).drawId());
+        assertThat(masterDataService.listDraws(PageRequest.of(0, 10)).getTotalElements()).isEqualTo(1);
+    }
+
+    @Test
+    void rejectsReturnDeadlineThatIsNotAfterReceiptTime() {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+        int sequence = SEQUENCE.incrementAndGet();
+        MasterDataDtos.AgencyResponse agency = masterDataService.createAgency(new MasterDataDtos.CreateAgencyRequest(
+                "AG-CUTOFF-" + sequence, "Đại lý hạn trả " + sequence, null, null));
+        Instant receivedAt = Instant.now();
+        InventoryDtos.BatchLineRequest line = new InventoryDtos.BatchLineRequest(
+                "XSKT Đồng Nai", "DN-" + sequence, LotteryRegion.SOUTH, BUSINESS_DATE,
+                receivedAt, 50, 9_000, 10_000, null, null);
+
+        assertThatThrownBy(() -> inventoryService.createBatch(new InventoryDtos.BatchRequest(
+                agency.id(), "CUTOFF-" + sequence, BUSINESS_DATE, receivedAt, null, List.of(line))))
+                .isInstanceOfSatisfying(BusinessException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.INVALID_REQUEST);
+                    assertThat(exception.getStatus().value()).isEqualTo(422);
+                });
+
+        InventoryDtos.BatchLineRequest afterDrawDate = new InventoryDtos.BatchLineRequest(
+                "XSKT Đồng Nai", "DN-LATE-" + sequence, LotteryRegion.SOUTH, BUSINESS_DATE,
+                BUSINESS_DATE.plusDays(1).atStartOfDay(STORE_ZONE).toInstant(),
+                50, 9_000, 10_000, null, null);
+        assertThatThrownBy(() -> inventoryService.createBatch(new InventoryDtos.BatchRequest(
+                agency.id(), "CUTOFF-LATE-" + sequence, BUSINESS_DATE, receivedAt, null, List.of(afterDrawDate))))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.INVALID_REQUEST));
+    }
+
+    @Test
+    void rejectsExpiredAgencyReturnButStillAllowsSellerToReturnToStore() {
+        Actor owner = createActor(Role.OWNER);
+        SellerActor sellerActor = createSellerActor(owner);
+        authenticate(owner, null);
+        int sequence = SEQUENCE.incrementAndGet();
+        Instant now = Instant.now();
+        LocalDate drawDate = LocalDate.now(STORE_ZONE);
+        MasterDataDtos.AgencyResponse agency = masterDataService.createAgency(new MasterDataDtos.CreateAgencyRequest(
+                "AG-LATE-" + sequence, "Đại lý quá hạn " + sequence, null, null));
+        InventoryDtos.BatchResponse batch = inventoryService.createBatch(new InventoryDtos.BatchRequest(
+                agency.id(),
+                "LATE-" + sequence,
+                drawDate,
+                now.minusSeconds(7_200),
+                null,
+                List.of(new InventoryDtos.BatchLineRequest(
+                        "XSKT Cần Thơ",
+                        "CT-" + sequence,
+                        LotteryRegion.SOUTH,
+                        drawDate,
+                        now.minusSeconds(3_600),
+                        20,
+                        9_000,
+                        10_000,
+                        null,
+                        null))));
+        batch = inventoryService.confirmBatch(batch.id());
+        Long batchLineId = batch.lines().getFirst().id();
+        InventoryDtos.AllocationResponse allocation = inventoryService.createAllocation(
+                new InventoryDtos.AllocationRequest(
+                        sellerActor.seller().getId(),
+                        drawDate,
+                        null,
+                        List.of(new InventoryDtos.AllocationLineRequest(batchLineId, 5))));
+        allocation = inventoryService.issueAllocation(allocation.id());
+
+        InventoryDtos.ReturnResponse sellerReturn = inventoryService.createReturn(new InventoryDtos.ReturnRequest(
+                TicketReturnType.SELLER_TO_STORE,
+                sellerActor.seller().getId(),
+                null,
+                drawDate,
+                null,
+                List.of(new InventoryDtos.ReturnLineRequest(
+                        batchLineId,
+                        allocation.lines().getFirst().id(),
+                        1))));
+        assertThat(inventoryService.confirmReturn(sellerReturn.id()).status()).isEqualTo(TicketReturnStatus.CONFIRMED);
+
+        assertThatThrownBy(() -> inventoryService.createReturn(new InventoryDtos.ReturnRequest(
+                TicketReturnType.STORE_TO_AGENCY,
+                null,
+                agency.id(),
+                drawDate,
+                null,
+                List.of(new InventoryDtos.ReturnLineRequest(batchLineId, null, 1)))))
+                .isInstanceOfSatisfying(BusinessException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.RETURN_CUTOFF_EXPIRED);
+                    assertThat(exception.getStatus().value()).isEqualTo(409);
+                });
+    }
+
+    @Test
     void rotatesRefreshTokensAndRejectsReplay() {
         Actor owner = createActor(Role.OWNER);
 
@@ -139,6 +327,122 @@ class TamLotteryBackendApplicationIT {
         assertThatThrownBy(() -> authService.refresh(first.refreshToken()))
                 .isInstanceOfSatisfying(BusinessException.class,
                         exception -> assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.UNAUTHORIZED));
+    }
+
+    @Test
+    void rejectsDuplicateUsernameIgnoringCaseAndWhitespace() {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+        int sequence = SEQUENCE.incrementAndGet();
+        String username = "cashier-" + sequence;
+
+        identityService.createUser(new IdentityDtos.CreateUserRequest(
+                username, TEST_PASSWORD, "Thu ngân", Set.of(Role.SELLER)));
+
+        assertThatThrownBy(() -> identityService.createUser(new IdentityDtos.CreateUserRequest(
+                "  " + username.toUpperCase() + "  ", TEST_PASSWORD, "Trùng tên", Set.of(Role.SELLER))))
+                .isInstanceOfSatisfying(BusinessException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.DUPLICATE_RESOURCE);
+                    assertThat(exception.getStatus().value()).isEqualTo(409);
+                });
+    }
+
+    @Test
+    void createsSellerAndLoginAccountAtomically() {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+        int sequence = SEQUENCE.incrementAndGet();
+        String username = "seller-login-" + sequence;
+        String sellerCode = "NV-LOGIN-" + sequence;
+
+        IdentityDtos.SellerResponse seller = identityService.createSeller(new IdentityDtos.CreateSellerRequest(
+                null,
+                sellerCode,
+                "Người bán có tài khoản",
+                "0909123456",
+                new IdentityDtos.CreateSellerLoginRequest(username, TEST_PASSWORD)));
+
+        UserAccount account = userRepository.findByUsernameIgnoreCase(username).orElseThrow();
+        assertThat(seller.userId()).isEqualTo(account.getId());
+        assertThat(account.getRoles()).containsExactly(Role.SELLER);
+        assertThat(sellerRepository.findByUserId(account.getId()).orElseThrow().getId()).isEqualTo(seller.id());
+        assertThat(authService.login(username, TEST_PASSWORD).accessToken()).isNotBlank();
+
+        long sellerCount = sellerRepository.count();
+        assertThatThrownBy(() -> identityService.createSeller(new IdentityDtos.CreateSellerRequest(
+                null,
+                sellerCode + "-ROLLBACK",
+                "Không được tạo dở dang",
+                null,
+                new IdentityDtos.CreateSellerLoginRequest("  " + username.toUpperCase() + "  ", TEST_PASSWORD))))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.DUPLICATE_RESOURCE));
+        assertThat(sellerRepository.count()).isEqualTo(sellerCount);
+        assertThat(sellerRepository.existsByStoreIdAndCodeIgnoreCase(
+                owner.store().getId(), sellerCode + "-ROLLBACK")).isFalse();
+    }
+
+    @Test
+    void managerCannotCreateSellerLoginAccount() {
+        Actor manager = createActor(Role.MANAGER);
+        authenticate(manager, null);
+        int sequence = SEQUENCE.incrementAndGet();
+
+        assertThatThrownBy(() -> identityService.createSeller(new IdentityDtos.CreateSellerRequest(
+                null,
+                "NV-MANAGER-" + sequence,
+                "Người bán",
+                null,
+                new IdentityDtos.CreateSellerLoginRequest("manager-created-" + sequence, TEST_PASSWORD))))
+                .isInstanceOfSatisfying(BusinessException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.FORBIDDEN);
+                    assertThat(exception.getStatus().value()).isEqualTo(403);
+                });
+    }
+
+    @Test
+    void updatesSellerAndRejectsDuplicateCodeWithinStore() {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+        int sequence = SEQUENCE.incrementAndGet();
+        String firstCode = "NV-" + sequence;
+        IdentityDtos.SellerResponse first = identityService.createSeller(
+                new IdentityDtos.CreateSellerRequest(null, firstCode, "Người bán một", null, null));
+        IdentityDtos.SellerResponse second = identityService.createSeller(
+                new IdentityDtos.CreateSellerRequest(null, firstCode + "-2", "Người bán hai", null, null));
+
+        IdentityDtos.SellerResponse updated = identityService.updateSeller(first.id(),
+                new IdentityDtos.UpdateSellerRequest(null, firstCode, "Người bán đã sửa", "0909000000"));
+        assertThat(updated.fullName()).isEqualTo("Người bán đã sửa");
+        assertThat(updated.phone()).isEqualTo("0909000000");
+
+        assertThatThrownBy(() -> identityService.updateSeller(second.id(),
+                new IdentityDtos.UpdateSellerRequest(null, "  " + firstCode.toLowerCase() + "  ", "Bị trùng", null)))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.DUPLICATE_RESOURCE));
+
+        IdentityDtos.SellerResponse inactive = identityService.changeSellerStatus(first.id(),
+                new IdentityDtos.ChangeSellerStatusRequest(SellerStatus.INACTIVE));
+        assertThat(inactive.status()).isEqualTo(SellerStatus.INACTIVE);
+    }
+
+    @Test
+    void disabledAccountCannotLoginAndOwnerCannotDisableSelf() {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+        int sequence = SEQUENCE.incrementAndGet();
+        IdentityDtos.UserResponse sellerUser = identityService.createUser(new IdentityDtos.CreateUserRequest(
+                "disabled-" + sequence, TEST_PASSWORD, "Tài khoản tạm ngưng", Set.of(Role.SELLER)));
+
+        identityService.changeUserStatus(sellerUser.id(), new IdentityDtos.ChangeUserStatusRequest(UserStatus.DISABLED));
+        assertThatThrownBy(() -> authService.login("disabled-" + sequence, TEST_PASSWORD))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.UNAUTHORIZED));
+
+        assertThatThrownBy(() -> identityService.changeUserStatus(
+                owner.user().getId(), new IdentityDtos.ChangeUserStatusRequest(UserStatus.DISABLED)))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.INVALID_REQUEST));
     }
 
     @Test
@@ -280,6 +584,60 @@ class TamLotteryBackendApplicationIT {
         }
     }
 
+    @Test
+    void sellerInventoryListsContainOnlyOwnRecords() {
+        Actor owner = createActor(Role.OWNER);
+        SellerActor firstSeller = createSellerActor(owner);
+        SellerActor secondSeller = createSellerActor(owner);
+        authenticate(owner, null);
+        InventoryScenario inventory = createInventoryScenario(owner, BUSINESS_DATE.plusDays(3), 100);
+        InventoryDtos.AllocationResponse first = inventoryService.issueAllocation(
+                createAllocation(firstSeller.seller(), inventory, 20).id());
+        inventoryService.issueAllocation(createAllocation(secondSeller.seller(), inventory, 20).id());
+        Long allocationLineId = first.lines().getFirst().id();
+
+        authenticate(firstSeller.actor(), firstSeller.seller());
+        inventoryService.createReturn(new InventoryDtos.ReturnRequest(
+                TicketReturnType.SELLER_TO_STORE,
+                firstSeller.seller().getId(),
+                null,
+                inventory.businessDate(),
+                null,
+                List.of(new InventoryDtos.ReturnLineRequest(
+                        inventory.batchLineId(), allocationLineId, 2))));
+        inventoryService.createAdjustment(new InventoryDtos.AdjustmentRequest(
+                inventory.batchLineId(),
+                InventoryHolderType.SELLER,
+                firstSeller.seller().getId(),
+                allocationLineId,
+                InventoryAdjustmentType.LOST,
+                AdjustmentDirection.DECREASE,
+                1,
+                "Báo mất vé"));
+
+        assertThat(inventoryService.listAllocations(PageRequest.of(0, 10)).getContent())
+                .extracting(InventoryDtos.AllocationResponse::sellerId)
+                .containsExactly(firstSeller.seller().getId());
+        assertThat(inventoryService.listReturns(PageRequest.of(0, 10)).getContent())
+                .extracting(InventoryDtos.ReturnResponse::sellerId)
+                .containsExactly(firstSeller.seller().getId());
+        assertThat(inventoryService.listAdjustments(PageRequest.of(0, 10)).getContent())
+                .extracting(InventoryDtos.AdjustmentResponse::sellerId)
+                .containsExactly(firstSeller.seller().getId());
+    }
+
+    private CashDtos.CashTransactionResponse createCashTransaction(long amount) {
+        return cashService.create(new CashDtos.CreateCashTransactionRequest(
+                null,
+                BUSINESS_DATE,
+                CashDirection.IN,
+                CashTransactionType.SALES_COLLECTION,
+                PaymentMethod.CASH,
+                amount,
+                Instant.now(),
+                null));
+    }
+
     private InventoryDtos.AllocationResponse createAllocation(
             Seller seller, InventoryScenario inventory, int quantity) {
         return inventoryService.createAllocation(new InventoryDtos.AllocationRequest(
@@ -308,19 +666,23 @@ class TamLotteryBackendApplicationIT {
         int sequence = SEQUENCE.incrementAndGet();
         MasterDataDtos.AgencyResponse agency = masterDataService.createAgency(new MasterDataDtos.CreateAgencyRequest(
                 "AG-" + sequence, "Đại lý " + sequence, null, null));
-        MasterDataDtos.LotteryDrawResponse draw = masterDataService.createDraw(new MasterDataDtos.CreateLotteryDrawRequest(
-                "Công ty xổ số " + sequence,
-                "P" + sequence,
-                LotteryRegion.SOUTH,
-                businessDate,
-                businessDate.atTime(16, 0).toInstant(ZoneOffset.UTC)));
         InventoryDtos.BatchResponse batch = inventoryService.createBatch(new InventoryDtos.BatchRequest(
                 agency.id(),
                 "RCPT-" + sequence,
                 businessDate,
                 Instant.now(),
                 null,
-                List.of(new InventoryDtos.BatchLineRequest(draw.id(), quantity, 9_000, 10_000, null, null))));
+                List.of(new InventoryDtos.BatchLineRequest(
+                        "Công ty xổ số " + sequence,
+                        "P" + sequence,
+                        LotteryRegion.SOUTH,
+                        businessDate,
+                        businessDate.atTime(16, 0).toInstant(ZoneOffset.UTC),
+                        quantity,
+                        9_000,
+                        10_000,
+                        null,
+                        null))));
         batch = inventoryService.confirmBatch(batch.id());
         return new InventoryScenario(
                 businessDate, agency.id(), batch.id(), batch.lines().getFirst().id());

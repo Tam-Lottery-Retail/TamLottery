@@ -20,6 +20,10 @@ spring:
   mvc:
     problemdetails:
       enabled: true
+  servlet:
+    multipart:
+      max-file-size: 5MB
+      max-request-size: 6MB
 
 server:
   port: ${SERVER_PORT:8080}
@@ -33,6 +37,16 @@ management:
     health:
       probes:
         enabled: true
+
+springdoc:
+  api-docs:
+    enabled: ${SPRINGDOC_API_DOCS_ENABLED:true}
+  swagger-ui:
+    enabled: ${SPRINGDOC_SWAGGER_UI_ENABLED:true}
+    path: /swagger-ui.html
+    operations-sorter: method
+    tags-sorter: alpha
+    display-request-duration: true
 
 app:
   security:
@@ -48,3 +62,12 @@ app:
     owner-username: ${BOOTSTRAP_OWNER_USERNAME:}
     owner-password: ${BOOTSTRAP_OWNER_PASSWORD:}
     owner-full-name: ${BOOTSTRAP_OWNER_FULL_NAME:}
+  demo:
+    enabled: false
+    exit-after-seed: false
+    store-code: ""
+    store-name: ""
+    owner-username: ""
+    owner-password: ""
+    seller-username: ""
+    seller-password: ""

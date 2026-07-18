@@ -21,6 +21,9 @@ public interface InventoryAdjustmentRepository extends JpaRepository<InventoryAd
     @EntityGraph(attributePaths = {"seller", "batchLine"})
     Page<InventoryAdjustment> findAllByStoreId(Long storeId, Pageable pageable);
 
+    @EntityGraph(attributePaths = {"seller", "batchLine"})
+    Page<InventoryAdjustment> findAllByStoreIdAndSellerId(Long storeId, Long sellerId, Pageable pageable);
+
     @Lock(LockModeType.PESSIMISTIC_WRITE)
     @Query("select a from InventoryAdjustment a where a.id = :id and a.store.id = :storeId")
     Optional<InventoryAdjustment> findForUpdate(@Param("id") Long id, @Param("storeId") Long storeId);

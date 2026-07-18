@@ -21,6 +21,9 @@ public interface TicketAllocationRepository extends JpaRepository<TicketAllocati
     @EntityGraph(attributePaths = {"seller"})
     Page<TicketAllocation> findAllByStoreId(Long storeId, Pageable pageable);
 
+    @EntityGraph(attributePaths = {"seller"})
+    Page<TicketAllocation> findAllByStoreIdAndSellerId(Long storeId, Long sellerId, Pageable pageable);
+
     @EntityGraph(attributePaths = {"seller", "lines", "lines.batchLine", "lines.batchLine.draw"})
     Optional<TicketAllocation> findByIdAndStoreId(Long id, Long storeId);
 
@@ -34,4 +37,3 @@ public interface TicketAllocationRepository extends JpaRepository<TicketAllocati
     List<TicketAllocation> findAllByStoreIdAndBusinessDateAndStatusIn(
             Long storeId, LocalDate businessDate, Collection<TicketAllocationStatus> statuses);
 }
-

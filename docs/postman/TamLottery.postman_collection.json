@@ -1,0 +1,270 @@
+{
+  "info": {
+    "_postman_id": "3b82f4e1-0ad6-4e0b-a731-tamlottery-v010",
+    "name": "TamLottery MVP v0.1.0",
+    "description": "Luồng API MVP: đăng nhập → tạo người bán/đại lý → nhận/giao/trả/mất vé → giao tiền → đối soát seller/store.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "auth": {
+    "type": "bearer",
+    "bearer": [{ "key": "token", "value": "{{accessToken}}", "type": "string" }]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "if (!pm.environment.get('runId')) pm.environment.set('runId', Date.now().toString());",
+          "if (!pm.environment.get('businessDate')) pm.environment.set('businessDate', new Date().toISOString().slice(0, 10));",
+          "pm.environment.set('returnCutoffAt', new Date(Date.now() + 6 * 60 * 60 * 1000).toISOString());"
+        ]
+      }
+    }
+  ],
+  "variable": [{ "key": "baseUrl", "value": "http://localhost:18080" }],
+  "item": [
+    {
+      "name": "01 - Authentication",
+      "item": [
+        {
+          "name": "Login owner demo",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"username\": \"{{ownerUsername}}\",\n  \"password\": \"{{ownerPassword}}\"\n}" },
+            "url": "{{baseUrl}}/api/v1/auth/login"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Login thành công', () => pm.response.to.have.status(200));",
+            "var responseJson = pm.response.json();",
+            "pm.environment.set('accessToken', responseJson.accessToken);",
+            "pm.environment.set('refreshToken', responseJson.refreshToken);"
+          ] } }]
+        },
+        {
+          "name": "Refresh token",
+          "request": {
+            "auth": { "type": "noauth" },
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"refreshToken\": \"{{refreshToken}}\"\n}" },
+            "url": "{{baseUrl}}/api/v1/auth/refresh"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Refresh thành công', () => pm.response.to.have.status(200));",
+            "var responseJson = pm.response.json();",
+            "pm.environment.set('accessToken', responseJson.accessToken);",
+            "pm.environment.set('refreshToken', responseJson.refreshToken);"
+          ] } }]
+        },
+        {
+          "name": "Current store",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/stores/current" }
+        }
+      ]
+    },
+    {
+      "name": "02 - Identity & Agency",
+      "item": [
+        {
+          "name": "Create seller with login account",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"userId\": null,\n  \"code\": \"PM-{{runId}}\",\n  \"fullName\": \"Seller Postman\",\n  \"phone\": \"0909000099\",\n  \"loginAccount\": {\n    \"username\": \"postman.seller.{{runId}}\",\n    \"password\": \"Postman@12345\"\n  }\n}" },
+            "url": "{{baseUrl}}/api/v1/sellers"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Seller được tạo', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));",
+            "pm.environment.set('sellerId', pm.response.json().id);"
+          ] } }]
+        },
+        {
+          "name": "Create agency",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"code\": \"DL-{{runId}}\",\n  \"name\": \"Đại lý Postman\",\n  \"contactName\": \"Anh Minh\",\n  \"phone\": \"0909000088\"\n}" },
+            "url": "{{baseUrl}}/api/v1/agencies"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Agency được tạo', () => pm.expect(pm.response.code).to.be.oneOf([200, 201]));",
+            "pm.environment.set('agencyId', pm.response.json().id);"
+          ] } }]
+        },
+        {
+          "name": "List sellers",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/sellers?size=100&sort=id,desc" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Danh sách seller tải thành công', () => pm.response.to.have.status(200));",
+            "var seededSeller = pm.response.json().content.find((seller) => seller.code === 'NV-DEMO');",
+            "pm.expect(seededSeller, 'Seeded demo seller').to.exist;",
+            "pm.environment.set('demoSellerId', seededSeller.id);"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "03 - Inventory",
+      "item": [
+        {
+          "name": "Create batch",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"agencyId\": {{agencyId}},\n  \"receiptCode\": \"PN-{{runId}}\",\n  \"businessDate\": \"{{businessDate}}\",\n  \"receivedAt\": \"{{$isoTimestamp}}\",\n  \"note\": \"Luồng Postman v0.1.0\",\n  \"lines\": [{\n    \"issuerName\": \"XSKT TP.HCM\",\n    \"provinceCode\": \"HCM\",\n    \"region\": \"SOUTH\",\n    \"drawDate\": \"{{businessDate}}\",\n    \"returnCutoffAt\": \"{{returnCutoffAt}}\",\n    \"quantityReceived\": 50,\n    \"unitCost\": 9000,\n    \"unitSalePrice\": 10000,\n    \"serialFrom\": \"PM0001\",\n    \"serialTo\": \"PM0050\"\n  }]\n}" },
+            "url": "{{baseUrl}}/api/v1/batches"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Batch draft được tạo', () => pm.response.to.have.status(201));",
+            "var responseJson = pm.response.json();",
+            "pm.environment.set('batchId', responseJson.id);",
+            "pm.environment.set('batchLineId', responseJson.lines[0].id);"
+          ] } }]
+        },
+        {
+          "name": "Confirm batch",
+          "request": { "method": "POST", "url": "{{baseUrl}}/api/v1/batches/{{batchId}}/confirm" }
+        },
+        {
+          "name": "Create allocation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"sellerId\": {{sellerId}},\n  \"businessDate\": \"{{businessDate}}\",\n  \"note\": \"Giao 20 vé\",\n  \"lines\": [{ \"batchLineId\": {{batchLineId}}, \"quantity\": 20 }]\n}" },
+            "url": "{{baseUrl}}/api/v1/allocations"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Allocation draft được tạo', () => pm.response.to.have.status(201));",
+            "pm.environment.set('allocationId', pm.response.json().id);"
+          ] } }]
+        },
+        {
+          "name": "Issue allocation",
+          "request": { "method": "POST", "url": "{{baseUrl}}/api/v1/allocations/{{allocationId}}/issue" },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Allocation được issue', () => pm.response.to.have.status(200));",
+            "pm.environment.set('allocationLineId', pm.response.json().lines[0].id);"
+          ] } }]
+        },
+        {
+          "name": "Seller return 5 tickets",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"returnType\": \"SELLER_TO_STORE\",\n  \"sellerId\": {{sellerId}},\n  \"agencyId\": null,\n  \"businessDate\": \"{{businessDate}}\",\n  \"note\": \"Seller trả 5 vé\",\n  \"lines\": [{ \"batchLineId\": {{batchLineId}}, \"allocationLineId\": {{allocationLineId}}, \"quantity\": 5 }]\n}" },
+            "url": "{{baseUrl}}/api/v1/returns"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.environment.set('sellerReturnId', pm.response.json().id);"] } }]
+        },
+        {
+          "name": "Confirm seller return",
+          "request": { "method": "POST", "url": "{{baseUrl}}/api/v1/returns/{{sellerReturnId}}/confirm" }
+        },
+        {
+          "name": "Report one lost ticket",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"batchLineId\": {{batchLineId}},\n  \"holderType\": \"SELLER\",\n  \"sellerId\": {{sellerId}},\n  \"allocationLineId\": {{allocationLineId}},\n  \"adjustmentType\": \"LOST\",\n  \"direction\": \"DECREASE\",\n  \"quantity\": 1,\n  \"reason\": \"Mất vé trong luồng Postman\"\n}" },
+            "url": "{{baseUrl}}/api/v1/inventory-adjustments"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.environment.set('adjustmentId', pm.response.json().id);"] } }]
+        },
+        {
+          "name": "Approve loss",
+          "request": { "method": "POST", "url": "{{baseUrl}}/api/v1/inventory-adjustments/{{adjustmentId}}/approve" }
+        },
+        {
+          "name": "Return 35 tickets to agency",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"returnType\": \"STORE_TO_AGENCY\",\n  \"sellerId\": null,\n  \"agencyId\": {{agencyId}},\n  \"businessDate\": \"{{businessDate}}\",\n  \"note\": \"Trả toàn bộ tồn cửa hàng\",\n  \"lines\": [{ \"batchLineId\": {{batchLineId}}, \"allocationLineId\": null, \"quantity\": 35 }]\n}" },
+            "url": "{{baseUrl}}/api/v1/returns"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.environment.set('agencyReturnId', pm.response.json().id);"] } }]
+        },
+        {
+          "name": "Confirm agency return",
+          "request": { "method": "POST", "url": "{{baseUrl}}/api/v1/returns/{{agencyReturnId}}/confirm" }
+        }
+      ]
+    },
+    {
+      "name": "04 - Cash & Reconciliation",
+      "item": [
+        {
+          "name": "Create seller cash collection",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"sellerId\": {{sellerId}},\n  \"businessDate\": \"{{businessDate}}\",\n  \"direction\": \"IN\",\n  \"transactionType\": \"SALES_COLLECTION\",\n  \"paymentMethod\": \"CASH\",\n  \"amount\": 140000,\n  \"occurredAt\": \"{{$isoTimestamp}}\",\n  \"note\": \"14 vé × 10.000đ\"\n}" },
+            "url": "{{baseUrl}}/api/v1/cash-transactions"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": ["pm.environment.set('cashId', pm.response.json().id);"] } }]
+        },
+        {
+          "name": "Post cash transaction",
+          "request": { "method": "POST", "url": "{{baseUrl}}/api/v1/cash-transactions/{{cashId}}/post" }
+        },
+        {
+          "name": "Preview seller reconciliation",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/reconciliations/preview?businessDate={{businessDate}}&scope=SELLER&sellerId={{sellerId}}" }
+        },
+        {
+          "name": "Close seller reconciliation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"businessDate\": \"{{businessDate}}\",\n  \"scope\": \"SELLER\",\n  \"sellerId\": {{sellerId}},\n  \"note\": null\n}" },
+            "url": "{{baseUrl}}/api/v1/reconciliations/close"
+          }
+        },
+        {
+          "name": "Close seeded demo seller reconciliation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"businessDate\": \"{{businessDate}}\",\n  \"scope\": \"SELLER\",\n  \"sellerId\": {{demoSellerId}},\n  \"note\": null\n}" },
+            "url": "{{baseUrl}}/api/v1/reconciliations/close"
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('Seller demo cân bằng và được chốt', () => pm.response.to.have.status(200));"
+          ] } }]
+        },
+        {
+          "name": "Preview store reconciliation",
+          "request": { "method": "GET", "url": "{{baseUrl}}/api/v1/reconciliations/preview?businessDate={{businessDate}}&scope=STORE" }
+        },
+        {
+          "name": "Close store reconciliation",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"businessDate\": \"{{businessDate}}\",\n  \"scope\": \"STORE\",\n  \"sellerId\": null,\n  \"note\": null\n}" },
+            "url": "{{baseUrl}}/api/v1/reconciliations/close"
+          }
+        }
+      ]
+    },
+    {
+      "name": "05 - Login seller demo",
+      "request": {
+        "auth": { "type": "noauth" },
+        "method": "POST",
+        "header": [{ "key": "Content-Type", "value": "application/json" }],
+        "body": { "mode": "raw", "raw": "{\n  \"username\": \"{{sellerUsername}}\",\n  \"password\": \"{{sellerPassword}}\"\n}" },
+        "url": "{{baseUrl}}/api/v1/auth/login"
+      },
+      "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+        "pm.test('Seller login thành công', () => pm.response.to.have.status(200));",
+        "var responseJson = pm.response.json();",
+        "pm.environment.set('accessToken', responseJson.accessToken);",
+        "pm.environment.set('refreshToken', responseJson.refreshToken);"
+      ] } }]
+    }
+  ]
+}

@@ -57,33 +57,9 @@ public class MasterDataService {
         return toAgencyResponse(agency);
     }
 
-    @Transactional
-    public MasterDataDtos.LotteryDrawResponse createDraw(MasterDataDtos.CreateLotteryDrawRequest request) {
-        Long storeId = currentUserProvider.get().storeId();
-        if (agencyDateExists(storeId, request)) {
-            throw BusinessException.conflict(ErrorCode.DUPLICATE_RESOURCE, "Lottery draw already exists");
-        }
-        Store store = storeRepository.getReferenceById(storeId);
-        LotteryDraw draw = new LotteryDraw(
-                store, request.issuerName(), request.provinceCode(), request.region(), request.drawDate(), request.returnCutoffAt());
-        return toDrawResponse(drawRepository.save(draw));
-    }
-
-    private boolean agencyDateExists(Long storeId, MasterDataDtos.CreateLotteryDrawRequest request) {
-        return drawRepository.existsByStoreIdAndProvinceCodeIgnoreCaseAndDrawDate(storeId, request.provinceCode(), request.drawDate());
-    }
-
     @Transactional(readOnly = true)
     public Page<MasterDataDtos.LotteryDrawResponse> listDraws(Pageable pageable) {
         return drawRepository.findAllByStoreId(currentUserProvider.get().storeId(), pageable).map(this::toDrawResponse);
-    }
-
-    @Transactional
-    public MasterDataDtos.LotteryDrawResponse changeDrawStatus(Long id, MasterDataDtos.ChangeLotteryDrawStatusRequest request) {
-        LotteryDraw draw = drawRepository.findByIdAndStoreId(id, currentUserProvider.get().storeId())
-                .orElseThrow(() -> BusinessException.notFound("Lottery draw not found"));
-        draw.changeStatus(request.status());
-        return toDrawResponse(draw);
     }
 
     private MasterDataDtos.AgencyResponse toAgencyResponse(Agency agency) {
@@ -97,4 +73,3 @@ public class MasterDataService {
                 draw.getReturnCutoffAt(), draw.getStatus());
     }
 }
-

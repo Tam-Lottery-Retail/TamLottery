@@ -326,8 +326,17 @@ public class ReconciliationService {
                 calculation.totalSoldQuantity(),
                 calculation.expectedAmount(),
                 calculation.actualReceivedAmount(),
+                calculation.sellerReconciliationAmount(),
                 calculation.differenceAmount(),
-                calculation.lines().stream().map(this::toLineResponse).toList());
+                calculation.lines().stream().map(this::toLineResponse).toList(),
+                calculation.attachableCash().stream().map(cash -> new ReconciliationDtos.ReconciliationCashResponse(
+                        cash.getId(),
+                        cash.getSeller() == null ? null : cash.getSeller().getId(),
+                        cash.getDirection(),
+                        cash.getTransactionType(),
+                        cash.getPaymentMethod(),
+                        cash.getAmount(),
+                        cash.getOccurredAt())).toList());
     }
 
     private ReconciliationDtos.SalesLineResponse toLineResponse(SalesCalculationService.Line line) {
@@ -356,7 +365,10 @@ public class ReconciliationService {
                 reconciliation.getDifferenceAmount(),
                 reconciliation.getStatus(),
                 reconciliation.getNote(),
-                reconciliation.getClosedAt());
+                reconciliation.getClosedAt(),
+                cashRepository.findAllByReconciliationId(reconciliation.getId()).stream()
+                        .map(CashTransaction::getId)
+                        .toList());
     }
 
     private ReconciliationDtos.DailySalesResponse toDailySalesResponse(DailySales sales) {
