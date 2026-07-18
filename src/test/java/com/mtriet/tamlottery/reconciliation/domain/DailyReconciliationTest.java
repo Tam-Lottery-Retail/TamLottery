@@ -35,6 +35,19 @@ class DailyReconciliationTest {
         assertThat(reconciliation.getStatus()).isEqualTo(ReconciliationStatus.CLOSED);
     }
 
+    @Test
+    void recordsReasonActorAndTimeWhenRejected() {
+        DailyReconciliation reconciliation = reconciliation(1_000_000, 980_000, "Thiếu tiền khi giao ca");
+        Instant reviewedAt = NOW.plusSeconds(60);
+
+        reconciliation.reject("Chưa có chứng từ giải trình", 99L, reviewedAt);
+
+        assertThat(reconciliation.getStatus()).isEqualTo(ReconciliationStatus.REJECTED);
+        assertThat(reconciliation.getRejectionReason()).isEqualTo("Chưa có chứng từ giải trình");
+        assertThat(reconciliation.getReviewedBy()).isEqualTo(99L);
+        assertThat(reconciliation.getReviewedAt()).isEqualTo(reviewedAt);
+    }
+
     private static DailyReconciliation reconciliation(long expected, long actual, String note) {
         Store store = new Store("TAM-01", "Tam Lottery");
         DailySales sales = new DailySales(

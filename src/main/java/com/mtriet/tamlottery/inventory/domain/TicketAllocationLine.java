@@ -25,6 +25,9 @@ public class TicketAllocationLine extends BaseEntity {
     @Column(name = "quantity_allocated", nullable = false)
     private int quantityAllocated;
 
+    @Column(name = "active_collected_amount", nullable = false)
+    private long activeCollectedAmount;
+
     protected TicketAllocationLine() {
     }
 
@@ -47,5 +50,20 @@ public class TicketAllocationLine extends BaseEntity {
 
     public int getQuantityAllocated() {
         return quantityAllocated;
+    }
+
+    public void collect(long amount) {
+        activeCollectedAmount = Math.addExact(activeCollectedAmount, amount);
+    }
+
+    public void releaseCollection(long amount) {
+        if (amount > activeCollectedAmount) {
+            throw new IllegalStateException("Collected amount cannot become negative");
+        }
+        activeCollectedAmount -= amount;
+    }
+
+    public long getActiveCollectedAmount() {
+        return activeCollectedAmount;
     }
 }

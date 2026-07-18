@@ -11,8 +11,12 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+
+import java.time.LocalDate;
+import java.util.List;
 
 @RestController
 @RequestMapping("/api/v1/cash-transactions")
@@ -35,6 +39,13 @@ public class CashController {
         return cashService.create(request);
     }
 
+    @GetMapping("/collection-sources")
+    List<CashDtos.CollectionSourceResponse> collectionSources(
+            @RequestParam LocalDate businessDate,
+            @RequestParam(required = false) Long sellerId) {
+        return cashService.collectionSources(businessDate, sellerId);
+    }
+
     @PostMapping("/{id}/post")
     @PreAuthorize("hasAnyRole('OWNER','MANAGER')")
     CashDtos.CashTransactionResponse post(@PathVariable Long id) {
@@ -43,7 +54,9 @@ public class CashController {
 
     @PostMapping("/{id}/void")
     @PreAuthorize("hasAnyRole('OWNER','MANAGER')")
-    CashDtos.CashTransactionResponse voidTransaction(@PathVariable Long id) {
-        return cashService.voidTransaction(id);
+    CashDtos.CashTransactionResponse voidTransaction(
+            @PathVariable Long id,
+            @Valid @RequestBody CashDtos.VoidCashTransactionRequest request) {
+        return cashService.voidTransaction(id, request);
     }
 }

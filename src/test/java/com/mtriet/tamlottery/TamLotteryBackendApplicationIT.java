@@ -168,6 +168,116 @@ class TamLotteryBackendApplicationIT {
     }
 
     @Test
+    void tracesSellerCollectionToTicketSourceAndRejectsAmountAboveRemainingExpectedRevenue() {
+        Actor owner = createActor(Role.OWNER);
+        SellerActor sellerActor = createSellerActor(owner);
+        LocalDate businessDate = BUSINESS_DATE.plusDays(5);
+        authenticate(owner, null);
+        InventoryScenario inventory = createInventoryScenario(owner, businessDate, 100);
+        InventoryDtos.AllocationResponse allocation = inventoryService.issueAllocation(
+                createAllocation(sellerActor.seller(), inventory, 50).id());
+        Long allocationLineId = allocation.lines().getFirst().id();
+
+        authenticate(sellerActor.actor(), sellerActor.seller());
+        CashDtos.CollectionSourceResponse available = cashService.collectionSources(businessDate, null).getFirst();
+        assertThat(available.allocationLineId()).isEqualTo(allocationLineId);
+        assertThat(available.soldQuantity()).isEqualTo(50);
+        assertThat(available.expectedAmount()).isEqualTo(500_000);
+        assertThat(available.remainingAmount()).isEqualTo(500_000);
+
+        CashDtos.CashTransactionResponse first = cashService.create(new CashDtos.CreateCashTransactionRequest(
+                null,
+                businessDate,
+                CashDirection.IN,
+                CashTransactionType.SALES_COLLECTION,
+                PaymentMethod.CASH,
+                300_000,
+                Instant.now(),
+                "Nộp tiền đợt một",
+                List.of(new CashDtos.CashSourceRequest(allocationLineId, 300_000))));
+        assertThat(first.sources()).singleElement().satisfies(source -> {
+            assertThat(source.allocationLineId()).isEqualTo(allocationLineId);
+            assertThat(source.receiptCode()).isNotBlank();
+            assertThat(source.amount()).isEqualTo(300_000);
+        });
+
+        assertThatThrownBy(() -> cashService.create(new CashDtos.CreateCashTransactionRequest(
+                null,
+                businessDate,
+                CashDirection.IN,
+                CashTransactionType.SALES_COLLECTION,
+                PaymentMethod.CASH,
+                250_000,
+                Instant.now(),
+                "Vượt số còn phải nộp",
+                List.of(new CashDtos.CashSourceRequest(allocationLineId, 250_000)))))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.CASH_COLLECTION_EXCEEDS_EXPECTED));
+
+        assertThat(cashService.collectionSources(businessDate, null).getFirst().remainingAmount()).isEqualTo(200_000);
+        authenticate(owner, null);
+        assertThatThrownBy(() -> cashService.voidTransaction(
+                first.id(), new CashDtos.VoidCashTransactionRequest("  ")))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.INVALID_REQUEST));
+        CashDtos.CashTransactionResponse voided = cashService.voidTransaction(
+                first.id(), new CashDtos.VoidCashTransactionRequest("Seller nhập nhầm số tiền"));
+        assertThat(voided.voidReason()).isEqualTo("Seller nhập nhầm số tiền");
+        assertThat(voided.voidedBy()).isEqualTo(owner.user().getId());
+        assertThat(voided.voidedAt()).isNotNull();
+        authenticate(sellerActor.actor(), sellerActor.seller());
+        assertThat(cashService.collectionSources(businessDate, null).getFirst().remainingAmount()).isEqualTo(500_000);
+    }
+
+    @Test
+    void requiresAndRecordsReasonWhenOwnerRejectsReconciliation() {
+        Actor owner = createActor(Role.OWNER);
+        SellerActor sellerActor = createSellerActor(owner);
+        LocalDate businessDate = BUSINESS_DATE.plusDays(8);
+        authenticate(owner, null);
+        InventoryScenario inventory = createInventoryScenario(owner, businessDate, 10);
+        InventoryDtos.AllocationResponse allocation = inventoryService.issueAllocation(
+                createAllocation(sellerActor.seller(), inventory, 10).id());
+        Long allocationLineId = allocation.lines().getFirst().id();
+
+        authenticate(sellerActor.actor(), sellerActor.seller());
+        CashDtos.CashTransactionResponse cash = cashService.create(new CashDtos.CreateCashTransactionRequest(
+                null,
+                businessDate,
+                CashDirection.IN,
+                CashTransactionType.SALES_COLLECTION,
+                PaymentMethod.CASH,
+                90_000,
+                Instant.now(),
+                "Seller còn thiếu tiền",
+                List.of(new CashDtos.CashSourceRequest(allocationLineId, 90_000))));
+
+        authenticate(owner, null);
+        cashService.post(cash.id());
+        ReconciliationDtos.ReconciliationResponse reconciliation = reconciliationService.close(
+                new ReconciliationDtos.CloseRequest(
+                        businessDate,
+                        SalesScope.SELLER,
+                        sellerActor.seller().getId(),
+                        "Thiếu 10.000đ"));
+        assertThat(reconciliation.status()).isEqualTo(ReconciliationStatus.REVIEW_REQUIRED);
+
+        assertThatThrownBy(() -> reconciliationService.reject(
+                reconciliation.id(), new ReconciliationDtos.RejectRequest(" ")))
+                .isInstanceOfSatisfying(BusinessException.class, exception ->
+                        assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.INVALID_REQUEST));
+
+        ReconciliationDtos.ReconciliationResponse rejected = reconciliationService.reject(
+                reconciliation.id(), new ReconciliationDtos.RejectRequest("Chưa có chứng từ giải trình"));
+        assertThat(rejected.status()).isEqualTo(ReconciliationStatus.REJECTED);
+        assertThat(rejected.rejectionReason()).isEqualTo("Chưa có chứng từ giải trình");
+        assertThat(rejected.reviewedBy()).isEqualTo(owner.user().getId());
+        assertThat(rejected.reviewedAt()).isNotNull();
+        assertThat(inventoryService.getAllocation(allocation.id()).status())
+                .isEqualTo(TicketAllocationStatus.ISSUED);
+    }
+
+    @Test
     void restoresStoreInventoryAfterSellerReturnAndAllowsDraftAllocationCancellation() {
         Actor owner = createActor(Role.OWNER);
         SellerActor sellerActor = createSellerActor(owner);
@@ -507,7 +617,8 @@ class TamLotteryBackendApplicationIT {
                 PaymentMethod.CASH,
                 480_000,
                 Instant.now(),
-                "Seller giao tiền"));
+                "Seller giao tiền",
+                List.of(new CashDtos.CashSourceRequest(allocationLineId, 480_000))));
         assertThat(cash.sellerId()).isEqualTo(sellerActor.seller().getId());
         assertThat(cash.status()).isEqualTo(CashTransactionStatus.PENDING);
 
@@ -556,6 +667,71 @@ class TamLotteryBackendApplicationIT {
     }
 
     @Test
+    void keepsClosedSellerAndStorePreviewsBalancedUsingFinalizedSnapshots() {
+        Actor owner = createActor(Role.OWNER);
+        SellerActor sellerActor = createSellerActor(owner);
+        LocalDate businessDate = BUSINESS_DATE.plusDays(9);
+        authenticate(owner, null);
+        InventoryScenario inventory = createInventoryScenario(owner, businessDate, 100);
+        InventoryDtos.AllocationResponse allocation = inventoryService.issueAllocation(
+                createAllocation(sellerActor.seller(), inventory, 40).id());
+        Long allocationLineId = allocation.lines().getFirst().id();
+
+        authenticate(sellerActor.actor(), sellerActor.seller());
+        CashDtos.CashTransactionResponse sellerCash = cashService.create(new CashDtos.CreateCashTransactionRequest(
+                null,
+                businessDate,
+                CashDirection.IN,
+                CashTransactionType.SALES_COLLECTION,
+                PaymentMethod.CASH,
+                400_000,
+                Instant.now(),
+                "Seller giao đủ tiền",
+                List.of(new CashDtos.CashSourceRequest(allocationLineId, 400_000))));
+
+        authenticate(owner, null);
+        cashService.post(sellerCash.id());
+        CashDtos.CashTransactionResponse counterCash = cashService.create(new CashDtos.CreateCashTransactionRequest(
+                null,
+                businessDate,
+                CashDirection.IN,
+                CashTransactionType.SALES_COLLECTION,
+                PaymentMethod.CASH,
+                600_000,
+                Instant.now(),
+                "Thu tiền bán tại quầy",
+                List.of()));
+        cashService.post(counterCash.id());
+
+        ReconciliationDtos.ReconciliationResponse sellerClose = reconciliationService.close(
+                new ReconciliationDtos.CloseRequest(
+                        businessDate, SalesScope.SELLER, sellerActor.seller().getId(), null));
+        ReconciliationDtos.ReconciliationResponse storeClose = reconciliationService.close(
+                new ReconciliationDtos.CloseRequest(businessDate, SalesScope.STORE, null, null));
+
+        ReconciliationDtos.PreviewResponse sellerPreview = reconciliationService.preview(
+                businessDate, SalesScope.SELLER, sellerActor.seller().getId());
+        assertThat(sellerPreview.reconciliationId()).isEqualTo(sellerClose.id());
+        assertThat(sellerPreview.reconciliationStatus()).isEqualTo(ReconciliationStatus.CLOSED);
+        assertThat(sellerPreview.expectedAmount()).isEqualTo(400_000);
+        assertThat(sellerPreview.actualReceivedAmount()).isEqualTo(400_000);
+        assertThat(sellerPreview.differenceAmount()).isZero();
+        assertThat(sellerPreview.cashTransactions()).extracting(ReconciliationDtos.ReconciliationCashResponse::id)
+                .containsExactly(sellerCash.id());
+
+        ReconciliationDtos.PreviewResponse storePreview = reconciliationService.preview(
+                businessDate, SalesScope.STORE, null);
+        assertThat(storePreview.reconciliationId()).isEqualTo(storeClose.id());
+        assertThat(storePreview.reconciliationStatus()).isEqualTo(ReconciliationStatus.CLOSED);
+        assertThat(storePreview.expectedAmount()).isEqualTo(1_000_000);
+        assertThat(storePreview.actualReceivedAmount()).isEqualTo(1_000_000);
+        assertThat(storePreview.sellerReconciliationAmount()).isEqualTo(400_000);
+        assertThat(storePreview.differenceAmount()).isZero();
+        assertThat(storePreview.cashTransactions()).extracting(ReconciliationDtos.ReconciliationCashResponse::id)
+                .containsExactly(counterCash.id());
+    }
+
+    @Test
     void serializesConcurrentAllocationsAndPreventsOverselling() throws Exception {
         Actor owner = createActor(Role.OWNER);
         SellerActor sellerActor = createSellerActor(owner);
@@ -579,6 +755,38 @@ class TamLotteryBackendApplicationIT {
             List<IssueOutcome> outcomes = List.of(firstResult.get(), secondResult.get());
             assertThat(outcomes).filteredOn(IssueOutcome::success).hasSize(1);
             assertThat(outcomes).filteredOn(outcome -> outcome.errorCode() == ErrorCode.INVENTORY_NOT_ENOUGH).hasSize(1);
+        } finally {
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void serializesConcurrentSellerCollectionsAndPreventsOverCollection() throws Exception {
+        Actor owner = createActor(Role.OWNER);
+        SellerActor sellerActor = createSellerActor(owner);
+        LocalDate businessDate = BUSINESS_DATE.plusDays(6);
+        authenticate(owner, null);
+        InventoryScenario inventory = createInventoryScenario(owner, businessDate, 100);
+        InventoryDtos.AllocationResponse allocation = inventoryService.issueAllocation(
+                createAllocation(sellerActor.seller(), inventory, 50).id());
+        Long allocationLineId = allocation.lines().getFirst().id();
+
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<IssueOutcome> firstResult = executor.submit(() -> collectConcurrently(
+                    sellerActor, businessDate, allocationLineId, ready, start));
+            Future<IssueOutcome> secondResult = executor.submit(() -> collectConcurrently(
+                    sellerActor, businessDate, allocationLineId, ready, start));
+            ready.await();
+            start.countDown();
+
+            List<IssueOutcome> outcomes = List.of(firstResult.get(), secondResult.get());
+            assertThat(outcomes).filteredOn(IssueOutcome::success).hasSize(1);
+            assertThat(outcomes)
+                    .filteredOn(outcome -> outcome.errorCode() == ErrorCode.CASH_COLLECTION_EXCEEDS_EXPECTED)
+                    .hasSize(1);
         } finally {
             executor.shutdownNow();
         }
@@ -635,7 +843,8 @@ class TamLotteryBackendApplicationIT {
                 PaymentMethod.CASH,
                 amount,
                 Instant.now(),
-                null));
+                null,
+                List.of()));
     }
 
     private InventoryDtos.AllocationResponse createAllocation(
@@ -654,6 +863,33 @@ class TamLotteryBackendApplicationIT {
         start.await();
         try {
             inventoryService.issueAllocation(allocationId);
+            return new IssueOutcome(true, null);
+        } catch (BusinessException exception) {
+            return new IssueOutcome(false, exception.getErrorCode());
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
+    }
+
+    private IssueOutcome collectConcurrently(SellerActor sellerActor,
+                                             LocalDate businessDate,
+                                             Long allocationLineId,
+                                             CountDownLatch ready,
+                                             CountDownLatch start) throws InterruptedException {
+        authenticate(sellerActor.actor(), sellerActor.seller());
+        ready.countDown();
+        start.await();
+        try {
+            cashService.create(new CashDtos.CreateCashTransactionRequest(
+                    null,
+                    businessDate,
+                    CashDirection.IN,
+                    CashTransactionType.SALES_COLLECTION,
+                    PaymentMethod.CASH,
+                    300_000,
+                    Instant.now(),
+                    "Nộp tiền đồng thời",
+                    List.of(new CashDtos.CashSourceRequest(allocationLineId, 300_000))));
             return new IssueOutcome(true, null);
         } catch (BusinessException exception) {
             return new IssueOutcome(false, exception.getErrorCode());

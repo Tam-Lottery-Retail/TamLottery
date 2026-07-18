@@ -38,6 +38,19 @@ public interface DailyReconciliationRepository extends JpaRepository<DailyReconc
     boolean existsByStoreIdAndBusinessDateAndScopeKeyAndStatus(
             Long storeId, LocalDate businessDate, String scopeKey, ReconciliationStatus status);
 
+    @EntityGraph(attributePaths = {
+            "seller",
+            "dailySales",
+            "dailySales.lines",
+            "dailySales.lines.batchLine",
+            "dailySales.lines.batchLine.draw"
+    })
+    Optional<DailyReconciliation> findFirstByStoreIdAndBusinessDateAndScopeKeyAndStatusInOrderByRevisionDesc(
+            Long storeId,
+            LocalDate businessDate,
+            String scopeKey,
+            Collection<ReconciliationStatus> statuses);
+
     List<DailyReconciliation> findAllByStoreIdAndBusinessDateAndScopeAndStatus(
             Long storeId, LocalDate businessDate, SalesScope scope, ReconciliationStatus status);
 
