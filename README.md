@@ -1,10 +1,11 @@
-# TamLottery Backend
+# TamLottery
 
-Backend quản lý lô vé, giao vé cho seller, trả vé, thất thoát, giao dịch tiền và đối soát cuối ngày.
+Ứng dụng quản lý lô vé, giao vé cho seller, trả vé, thất thoát, giao dịch tiền và đối soát cuối ngày. Repository gồm Spring Boot backend và React frontend.
 
 ## Yêu cầu
 
 - Java 25
+- Node.js 22.13 trở lên khi phát triển frontend local
 - Docker Desktop hoặc MySQL 8.4
 - `JAVA_HOME` trỏ tới JDK 25
 
@@ -34,6 +35,18 @@ nhưng sẽ loại credential khỏi URL trước khi khởi tạo datasource:
 Profile `aiven` mặc định giới hạn HikariCP ở 5 connection để phù hợp instance nhỏ. Production nên truyền thêm
 `JWT_SECRET` và các biến `BOOTSTRAP_*` qua secret manager của nền tảng chạy ứng dụng.
 
+## Chạy frontend local
+
+Backend cần chạy ở port `8080`.
+
+```powershell
+Set-Location frontend
+npm install
+npm run dev
+```
+
+Frontend mặc định mở tại `http://localhost:3000` và proxy `/api` về backend.
+
 ## Chạy Docker
 
 ```powershell
@@ -41,8 +54,8 @@ Copy-Item .env.example .env
 docker compose up --build
 ```
 
-Compose chỉ chạy ứng dụng và kết nối Aiven MySQL; nó không tạo MySQL local. Không commit `.env`.
-`JWT_SECRET` là bắt buộc. Health endpoint: `GET /actuator/health`.
+Compose chạy backend và frontend; backend kết nối Aiven MySQL, không tạo MySQL local. Không commit `.env`.
+`JWT_SECRET` là bắt buộc. Giao diện mặc định tại `http://localhost:3000`; backend health tại `GET http://localhost:8080/actuator/health`.
 
 ## Kiểm thử
 
