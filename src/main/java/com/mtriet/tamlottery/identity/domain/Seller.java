@@ -53,6 +53,13 @@ public class Seller extends BaseEntity {
         this.status = status;
     }
 
+    public void updateDetails(UserAccount user, String code, String fullName, String phone) {
+        this.user = user;
+        this.code = code.trim().toUpperCase();
+        this.fullName = fullName.trim();
+        this.phone = normalizeNullable(phone);
+    }
+
     private static String normalizeNullable(String value) {
         return value == null || value.isBlank() ? null : value.trim();
     }
@@ -81,4 +88,3 @@ public class Seller extends BaseEntity {
         return status;
     }
 }
-

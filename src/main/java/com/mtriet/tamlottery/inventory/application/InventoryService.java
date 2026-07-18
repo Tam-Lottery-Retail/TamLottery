@@ -210,7 +210,11 @@ public class InventoryService {
 
     @Transactional(readOnly = true)
     public Page<InventoryDtos.AllocationResponse> listAllocations(Pageable pageable) {
-        return allocationRepository.findAllByStoreId(currentUserProvider.get().storeId(), pageable)
+        CurrentUser current = currentUserProvider.get();
+        requireLinkedSeller(current);
+        return (sellerOnly(current)
+                ? allocationRepository.findAllByStoreIdAndSellerId(current.storeId(), current.sellerId(), pageable)
+                : allocationRepository.findAllByStoreId(current.storeId(), pageable))
                 .map(this::toAllocationResponse);
     }
 
@@ -309,7 +313,12 @@ public class InventoryService {
 
     @Transactional(readOnly = true)
     public Page<InventoryDtos.ReturnResponse> listReturns(Pageable pageable) {
-        return returnRepository.findAllByStoreId(currentUserProvider.get().storeId(), pageable).map(this::toReturnResponse);
+        CurrentUser current = currentUserProvider.get();
+        requireLinkedSeller(current);
+        return (sellerOnly(current)
+                ? returnRepository.findAllByStoreIdAndSellerId(current.storeId(), current.sellerId(), pageable)
+                : returnRepository.findAllByStoreId(current.storeId(), pageable))
+                .map(this::toReturnResponse);
     }
 
     @Transactional(readOnly = true)
@@ -403,7 +412,11 @@ public class InventoryService {
 
     @Transactional(readOnly = true)
     public Page<InventoryDtos.AdjustmentResponse> listAdjustments(Pageable pageable) {
-        return adjustmentRepository.findAllByStoreId(currentUserProvider.get().storeId(), pageable)
+        CurrentUser current = currentUserProvider.get();
+        requireLinkedSeller(current);
+        return (sellerOnly(current)
+                ? adjustmentRepository.findAllByStoreIdAndSellerId(current.storeId(), current.sellerId(), pageable)
+                : adjustmentRepository.findAllByStoreId(current.storeId(), pageable))
                 .map(this::toAdjustmentResponse);
     }
 
@@ -503,6 +516,13 @@ public class InventoryService {
 
     private boolean sellerOnly(CurrentUser current) {
         return current.hasRole(Role.SELLER) && !current.hasRole(Role.OWNER) && !current.hasRole(Role.MANAGER);
+    }
+
+    private void requireLinkedSeller(CurrentUser current) {
+        if (sellerOnly(current) && current.sellerId() == null) {
+            throw new BusinessException(ErrorCode.FORBIDDEN, org.springframework.http.HttpStatus.FORBIDDEN,
+                    "User has no seller profile");
+        }
     }
 
     private void requireState(boolean valid, String message) {

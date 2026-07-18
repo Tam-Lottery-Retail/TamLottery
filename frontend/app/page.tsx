@@ -23,6 +23,7 @@ type ModalKind =
   | "cash";
 
 type PageResponse<T> = { content: T[]; totalElements: number };
+type Action = (path: string, success: string, method?: string, body?: unknown) => Promise<void>;
 type TokenResponse = { tokenType: string; accessToken: string; refreshToken: string; expiresInSeconds: number };
 type Store = { id: number; code: string; name: string; timezone: string; status: string };
 type Agency = { id: number; code: string; name: string; contactName?: string; phone?: string; active: boolean };
@@ -40,8 +41,10 @@ type TicketReturn = { id: number; returnType: string; sellerId?: number; agencyI
 type Adjustment = { id: number; batchLineId: number; holderType: string; sellerId?: number; allocationLineId?: number; adjustmentType: string; direction: string; quantity: number; reason: string; status: string };
 type CashTransaction = { id: number; sellerId?: number; reconciliationId?: number; businessDate: string; direction: string; transactionType: string; paymentMethod: string; amount: number; occurredAt: string; note?: string; status: string; postedAt?: string };
 type SalesLine = { batchLineId: number; provinceCode: string; drawDate: string; baseQuantity: number; returnedQuantity: number; lostQuantity: number; soldQuantity: number; unitSalePrice: number; expectedAmount: number };
-type Preview = { businessDate: string; scope: string; sellerId?: number; totalBaseQuantity: number; totalReturnedQuantity: number; totalLostQuantity: number; totalSoldQuantity: number; expectedAmount: number; actualReceivedAmount: number; differenceAmount: number; lines: SalesLine[] };
-type Reconciliation = { id: number; dailySalesId: number; businessDate: string; scope: string; sellerId?: number; revision: number; expectedAmount: number; actualReceivedAmount: number; differenceAmount: number; status: string; note?: string; closedAt?: string };
+type PreviewCash = { id: number; sellerId?: number; direction: string; transactionType: string; paymentMethod: string; amount: number; occurredAt: string };
+type Preview = { businessDate: string; scope: string; sellerId?: number; totalBaseQuantity: number; totalReturnedQuantity: number; totalLostQuantity: number; totalSoldQuantity: number; expectedAmount: number; actualReceivedAmount: number; sellerReconciliationAmount: number; differenceAmount: number; lines: SalesLine[]; cashTransactions: PreviewCash[] };
+type Reconciliation = { id: number; dailySalesId: number; businessDate: string; scope: string; sellerId?: number; revision: number; expectedAmount: number; actualReceivedAmount: number; differenceAmount: number; status: string; note?: string; closedAt?: string; cashTransactionIds: number[] };
+type SessionClaims = { roles: Role[]; userId?: number; sellerId?: number };
 
 type Snapshot = {
   store?: Store;
@@ -88,10 +91,16 @@ const qs = "?size=100&sort=id,desc";
 const STATUS_LABELS: Record<string, string> = {
   DRAFT: "Bản nháp", CONFIRMED: "Đã xác nhận", CLOSED: "Đã chốt", CANCELLED: "Đã hủy",
   ISSUED: "Đã giao", RECONCILED: "Đã đối soát", PENDING: "Chờ xác nhận", POSTED: "Đã ghi sổ",
-  VOIDED: "Đã hủy", APPROVED: "Đã duyệt", REJECTED: "Từ chối", REVIEW_REQUIRED: "Cần xem xét",
+  VOID: "Đã hủy", VOIDED: "Đã hủy", APPROVED: "Đã duyệt", REJECTED: "Từ chối", REVIEW_REQUIRED: "Cần xem xét",
   ACTIVE: "Hoạt động", INACTIVE: "Ngừng hoạt động", LOCKED: "Đã khóa", DISABLED: "Đã vô hiệu",
   OPEN: "Đang mở", SELLER_TO_STORE: "Seller trả cửa hàng", STORE_TO_AGENCY: "Cửa hàng trả đại lý",
 };
+
+const CASH_TYPE_LABELS: Record<string, string> = {
+  SALES_COLLECTION: "Thu tiền bán vé", REFUND: "Hoàn tiền", ADJUSTMENT: "Điều chỉnh",
+  EXPENSE: "Chi phí", AGENCY_PAYMENT: "Thanh toán đại lý",
+};
+const PAYMENT_LABELS: Record<string, string> = { CASH: "Tiền mặt", BANK_TRANSFER: "Chuyển khoản", EWALLET: "Ví điện tử" };
 
 class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -140,13 +149,17 @@ async function api<T>(path: string, init: RequestInit = {}, canRefresh = true): 
   return response.json();
 }
 
-function decodeRoles(token: string | null): Role[] {
-  if (!token) return [];
+function decodeSession(token: string | null): SessionClaims {
+  if (!token) return { roles: [] };
   try {
     const part = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
     const payload = JSON.parse(atob(part.padEnd(Math.ceil(part.length / 4) * 4, "=")));
-    return Array.isArray(payload.roles) ? payload.roles : [];
-  } catch { return []; }
+    return {
+      roles: Array.isArray(payload.roles) ? payload.roles : [],
+      userId: payload.sub ? Number(payload.sub) : undefined,
+      sellerId: payload.sellerId ? Number(payload.sellerId) : undefined,
+    };
+  } catch { return { roles: [] }; }
 }
 
 const NAV_ITEMS: Array<{ id: Section; icon: string; label: string; managerOnly?: boolean }> = [
@@ -163,10 +176,13 @@ const NAV_ITEMS: Array<{ id: Section; icon: string; label: string; managerOnly?:
 export default function Home() {
   const [authenticated, setAuthenticated] = useState(false);
   const [roles, setRoles] = useState<Role[]>([]);
+  const [currentUserId, setCurrentUserId] = useState<number>();
+  const [currentSellerId, setCurrentSellerId] = useState<number>();
   const [active, setActive] = useState<Section>("overview");
   const [snapshot, setSnapshot] = useState<Snapshot>(EMPTY_SNAPSHOT);
   const [loading, setLoading] = useState(false);
   const [modal, setModal] = useState<ModalKind | null>(null);
+  const [editingSeller, setEditingSeller] = useState<Seller | null>(null);
   const [notice, setNotice] = useState<{ tone: "success" | "error"; message: string } | null>(null);
 
   const isManager = roles.includes("OWNER") || roles.includes("MANAGER");
@@ -182,6 +198,9 @@ export default function Home() {
       }
     };
     try {
+      const previewPath = isManager
+        ? `/api/v1/reconciliations/preview?businessDate=${today()}&scope=STORE`
+        : currentSellerId ? `/api/v1/reconciliations/preview?businessDate=${today()}&scope=SELLER&sellerId=${currentSellerId}` : "";
       const [store, agencies, draws, users, sellers, batches, allocations, returns, adjustments, cash, reconciliations, preview] = await Promise.all([
         api<Store>("/api/v1/stores/current"),
         isManager ? safe<PageResponse<Agency>>(`/api/v1/agencies${qs}`, { content: [], totalElements: 0 }) : Promise.resolve({ content: [], totalElements: 0 }),
@@ -189,12 +208,12 @@ export default function Home() {
         isOwner ? safe<PageResponse<User>>(`/api/v1/users${qs}`, { content: [], totalElements: 0 }) : Promise.resolve({ content: [], totalElements: 0 }),
         isManager ? safe<PageResponse<Seller>>(`/api/v1/sellers${qs}`, { content: [], totalElements: 0 }) : Promise.resolve({ content: [], totalElements: 0 }),
         isManager ? safe<PageResponse<Batch>>(`/api/v1/batches${qs}`, { content: [], totalElements: 0 }) : Promise.resolve({ content: [], totalElements: 0 }),
-        isManager ? safe<PageResponse<Allocation>>(`/api/v1/allocations${qs}`, { content: [], totalElements: 0 }) : Promise.resolve({ content: [], totalElements: 0 }),
-        isManager ? safe<PageResponse<TicketReturn>>(`/api/v1/returns${qs}`, { content: [], totalElements: 0 }) : Promise.resolve({ content: [], totalElements: 0 }),
-        isManager ? safe<PageResponse<Adjustment>>(`/api/v1/inventory-adjustments${qs}`, { content: [], totalElements: 0 }) : Promise.resolve({ content: [], totalElements: 0 }),
+        safe<PageResponse<Allocation>>(`/api/v1/allocations${qs}`, { content: [], totalElements: 0 }),
+        safe<PageResponse<TicketReturn>>(`/api/v1/returns${qs}`, { content: [], totalElements: 0 }),
+        safe<PageResponse<Adjustment>>(`/api/v1/inventory-adjustments${qs}`, { content: [], totalElements: 0 }),
         safe<PageResponse<CashTransaction>>(`/api/v1/cash-transactions${qs}`, { content: [], totalElements: 0 }),
         safe<PageResponse<Reconciliation>>(`/api/v1/reconciliations${qs}`, { content: [], totalElements: 0 }),
-        safe<Preview>(`/api/v1/reconciliations/preview?businessDate=${today()}&scope=STORE`, undefined as unknown as Preview),
+        previewPath ? safe<Preview>(previewPath, undefined as unknown as Preview) : Promise.resolve(undefined as unknown as Preview),
       ]);
       setSnapshot({ store, agencies: pageContent(agencies), draws: pageContent(draws), users: pageContent(users), sellers: pageContent(sellers), batches: pageContent(batches), allocations: pageContent(allocations), returns: pageContent(returns), adjustments: pageContent(adjustments), cash: pageContent(cash), reconciliations: pageContent(reconciliations), preview });
       setAuthenticated(true);
@@ -206,12 +225,13 @@ export default function Home() {
         setNotice({ tone: "error", message: error instanceof Error ? error.message : "Không thể tải dữ liệu" });
       }
     } finally { setLoading(false); }
-  }, [isManager, isOwner]);
+  }, [isManager, isOwner, currentSellerId]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const token = sessionStorage.getItem("tamlottery.access");
-      setRoles(decodeRoles(token));
+      const session = decodeSession(token);
+      setRoles(session.roles); setCurrentUserId(session.userId); setCurrentSellerId(session.sellerId);
       if (token) setAuthenticated(true);
     }, 0);
     return () => window.clearTimeout(timer);
@@ -242,10 +262,11 @@ export default function Home() {
     clearTokens();
     setAuthenticated(false);
     setRoles([]);
+    setCurrentUserId(undefined); setCurrentSellerId(undefined);
     setSnapshot(EMPTY_SNAPSHOT);
   };
 
-  if (!authenticated) return <LoginScreen onLogin={(newRoles) => { setRoles(newRoles); setAuthenticated(true); }} />;
+  if (!authenticated) return <LoginScreen onLogin={(session) => { setRoles(session.roles); setCurrentUserId(session.userId); setCurrentSellerId(session.sellerId); setAuthenticated(true); }} />;
 
   const visibleNav = NAV_ITEMS.filter((item) => !item.managerOnly || isManager);
   const title = visibleNav.find((item) => item.id === active)?.label ?? "Tổng quan";
@@ -278,24 +299,25 @@ export default function Home() {
 
         {loading && <div className="loading-bar" aria-label="Đang tải" />}
         <section className="content-area">
-          {active === "overview" && <Overview snapshot={snapshot} onNavigate={setActive} />}
+          {active === "overview" && <Overview snapshot={snapshot} isManager={isManager} currentSellerId={currentSellerId} onNavigate={setActive} />}
           {active === "batches" && <BatchesView items={snapshot.batches} onAction={perform} />}
           {active === "allocations" && <AllocationsView items={snapshot.allocations} onAction={perform} />}
           {active === "returns" && <ReturnsView returns={snapshot.returns} adjustments={snapshot.adjustments} isManager={isManager} onOpen={setModal} onAction={perform} />}
-          {active === "cash" && <CashView items={snapshot.cash} isManager={isManager} onAction={perform} />}
-          {active === "reconciliation" && <ReconciliationView items={snapshot.reconciliations} sellers={snapshot.sellers} isOwner={isOwner} onAction={perform} notify={notify} reload={load} />}
+          {active === "cash" && <CashView items={snapshot.cash} sellers={snapshot.sellers} isManager={isManager} onAction={perform} />}
+          {active === "reconciliation" && <ReconciliationView items={snapshot.reconciliations} sellers={snapshot.sellers} isManager={isManager} isOwner={isOwner} currentSellerId={currentSellerId} onAction={perform} notify={notify} reload={load} />}
           {active === "catalog" && <CatalogView agencies={snapshot.agencies} draws={snapshot.draws} />}
-          {active === "team" && <TeamView users={snapshot.users} sellers={snapshot.sellers} isOwner={isOwner} onOpen={setModal} />}
+          {active === "team" && <TeamView users={snapshot.users} sellers={snapshot.sellers} isOwner={isOwner} currentUserId={currentUserId} onOpen={setModal} onEditSeller={setEditingSeller} onAction={perform} />}
         </section>
       </main>
 
-      {modal && <EntityModal kind={modal} snapshot={snapshot} onClose={() => setModal(null)} onCreated={async (message) => { setModal(null); notify("success", message); await load(); }} />}
+      {modal && <EntityModal kind={modal} snapshot={snapshot} isManager={isManager} isOwner={isOwner} currentSellerId={currentSellerId} onClose={() => setModal(null)} onCreated={async (message) => { setModal(null); notify("success", message); await load(); }} />}
+      {editingSeller && <SellerEditModal seller={editingSeller} users={snapshot.users} sellers={snapshot.sellers} onClose={() => setEditingSeller(null)} onSaved={async () => { setEditingSeller(null); notify("success", "Đã cập nhật seller"); await load(); }} />}
       {notice && <div className={`toast ${notice.tone}`} role="status"><span>{notice.tone === "success" ? "✓" : "!"}</span>{notice.message}</div>}
     </div>
   );
 }
 
-function LoginScreen({ onLogin }: { onLogin: (roles: Role[]) => void }) {
+function LoginScreen({ onLogin }: { onLogin: (session: SessionClaims) => void }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const submit = async (event: FormEvent<HTMLFormElement>) => {
@@ -303,7 +325,7 @@ function LoginScreen({ onLogin }: { onLogin: (roles: Role[]) => void }) {
     const data = new FormData(event.currentTarget);
     try {
       const tokens = await api<TokenResponse>("/api/v1/auth/login", { method: "POST", body: JSON.stringify({ username: data.get("username"), password: data.get("password") }) });
-      saveTokens(tokens); onLogin(decodeRoles(tokens.accessToken));
+      saveTokens(tokens); onLogin(decodeSession(tokens.accessToken));
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Đăng nhập thất bại"); }
     finally { setLoading(false); }
   };
@@ -332,13 +354,14 @@ function QuickCreate({ active, isManager, onOpen }: { active: Section; isManager
   const map: Partial<Record<Section, { kind: ModalKind; label: string }>> = {
     batches: { kind: "batch", label: "Nhận lô vé" }, allocations: { kind: "allocation", label: "Giao vé" },
     returns: { kind: "return", label: "Tạo phiếu trả" }, cash: { kind: "cash", label: "Thêm giao dịch" },
-    catalog: { kind: "agency", label: "Thêm đại lý" }, team: { kind: "seller", label: "Thêm seller" },
+    catalog: { kind: "agency", label: "Thêm đại lý" }, team: { kind: "seller", label: "Thêm người bán" },
   };
   const action = map[active] ?? (isManager ? { kind: "batch" as ModalKind, label: "Nhập liệu mới" } : { kind: "cash" as ModalKind, label: "Giao tiền" });
   return <button className="primary-button" onClick={() => onOpen(action.kind)}>＋ {action.label}</button>;
 }
 
-function Overview({ snapshot, onNavigate }: { snapshot: Snapshot; onNavigate: (section: Section) => void }) {
+function Overview({ snapshot, isManager, currentSellerId, onNavigate }: { snapshot: Snapshot; isManager: boolean; currentSellerId?: number; onNavigate: (section: Section) => void }) {
+  if (!isManager) return <SellerOverview snapshot={snapshot} currentSellerId={currentSellerId} onNavigate={onNavigate} />;
   const date = today();
   const todaysBatches = snapshot.batches.filter((item) => item.businessDate === date);
   const received = todaysBatches.flatMap((item) => item.lines).reduce((sum, item) => sum + item.quantityReceived, 0);
@@ -382,6 +405,35 @@ function Overview({ snapshot, onNavigate }: { snapshot: Snapshot; onNavigate: (s
   );
 }
 
+function SellerOverview({ snapshot, currentSellerId, onNavigate }: { snapshot: Snapshot; currentSellerId?: number; onNavigate: (section: Section) => void }) {
+  const preview = snapshot.preview;
+  const pendingCash = snapshot.cash.filter((item) => item.status === "PENDING").length;
+  const pendingAdjustments = snapshot.adjustments.filter((item) => item.status === "PENDING").length;
+  const recent = snapshot.cash.slice(0, 5);
+  const linked = Boolean(currentSellerId);
+  return <div className="stack-lg">
+    <section className="hero-card">
+      <div><p className="eyebrow light-text">Của tôi hôm nay</p><h2>{!linked ? "Tài khoản chưa liên kết người bán." : preview?.differenceAmount === 0 ? "Sổ của bạn đang cân bằng." : "Có chênh lệch cần kiểm tra."}</h2><p>{!linked ? "Nhờ owner liên kết tài khoản này với hồ sơ người bán trong mục Nhân sự." : preview ? `${number.format(preview.totalSoldQuantity)} vé bán ước tính, doanh thu dự kiến ${formatMoney(preview.expectedAmount)}.` : "Đang chờ dữ liệu giao vé đầu tiên trong ngày."}</p></div>
+      <div className="hero-total"><small>Chênh lệch của tôi</small><strong>{formatMoney(preview?.differenceAmount)}</strong><span className={!linked ? "signal warn" : preview?.differenceAmount === 0 ? "signal good" : "signal warn"}>{!linked ? "Chưa liên kết" : preview?.differenceAmount === 0 ? "Đã khớp" : "Cần đối soát"}</span></div>
+    </section>
+    <section className="metric-grid">
+      <Metric label="Vé được giao" value={number.format(preview?.totalBaseQuantity ?? 0)} hint="Tổng vé cửa hàng giao cho tôi" tone="blue" />
+      <Metric label="Vé đã trả" value={number.format(preview?.totalReturnedQuantity ?? 0)} hint="Vé đã trả về cửa hàng" tone="ink" />
+      <Metric label="Vé thất thoát" value={number.format(preview?.totalLostQuantity ?? 0)} hint="Thất thoát đã được duyệt" tone="orange" />
+      <Metric label="Vé bán ước tính" value={number.format(preview?.totalSoldQuantity ?? 0)} hint="Giao trừ trả và thất thoát" tone="green" />
+    </section>
+    <section className="mini-metrics">
+      <Metric label="Doanh thu dự kiến của tôi" value={formatMoney(preview?.expectedAmount)} hint="Vé bán × giá bán" tone="green" />
+      <Metric label="Tiền tôi đã giao" value={formatMoney(preview?.actualReceivedAmount)} hint="Giao dịch đã được ghi sổ" tone="ink" />
+      <Metric label="Việc chờ xác nhận" value={number.format(pendingCash + pendingAdjustments)} hint={`${pendingCash} giao dịch tiền · ${pendingAdjustments} điều chỉnh vé`} tone="orange" />
+    </section>
+    <section className="two-column">
+      <div className="panel"><PanelHeader title="Thao tác của tôi" subtitle="Các việc seller thường làm trong ngày" /><div className="quick-grid"><button onClick={() => onNavigate("cash")}><span>GT</span><strong>Giao tiền</strong><small>Ghi nhận tiền giao cửa hàng</small></button><button onClick={() => onNavigate("returns")}><span>TV</span><strong>Trả vé</strong><small>Trả vé chưa bán</small></button><button onClick={() => onNavigate("returns")}><span>TT</span><strong>Báo thất thoát</strong><small>Gửi manager duyệt</small></button><button onClick={() => onNavigate("reconciliation")}><span>ĐS</span><strong>Đối soát của tôi</strong><small>Kiểm tra vé và tiền</small></button></div></div>
+      <div className="panel"><PanelHeader title="Giao dịch gần đây của tôi" subtitle="Chỉ hiển thị giao dịch thuộc seller đang đăng nhập" count={recent.length} /><div className="activity-list">{recent.length ? recent.map((item) => <div className="activity" key={item.id}><span className="activity-dot" /><div><strong>{CASH_TYPE_LABELS[item.transactionType] ?? item.transactionType}</strong><small>{formatMoney(item.amount)} · {PAYMENT_LABELS[item.paymentMethod] ?? item.paymentMethod}</small></div><div><Status value={item.status} /><small>{formatDateTime(item.occurredAt)}</small></div></div>) : <Empty text="Chưa có giao dịch tiền trong ngày" />}</div></div>
+    </section>
+  </div>;
+}
+
 function BatchesView({ items, onAction }: { items: Batch[]; onAction: (path: string, success: string) => Promise<void> }) {
   return <div className="panel"><PanelHeader title="Lô vé đã nhận" subtitle="Theo dõi phiếu nhận vé từ đại lý" count={items.length} />
     <DataTable headers={["Phiếu nhận", "Ngày bán", "Đại lý", "Số vé", "Giá trị bán", "Trạng thái", ""]} empty="Chưa có lô vé nào">
@@ -406,24 +458,28 @@ function ReturnsView({ returns, adjustments, isManager, onOpen, onAction }: { re
     </DataTable></div></div>;
 }
 
-function CashView({ items, isManager, onAction }: { items: CashTransaction[]; isManager: boolean; onAction: (path: string, success: string) => Promise<void> }) {
-  const totalIn = items.filter((item) => item.status === "POSTED" && item.direction === "IN").reduce((s, i) => s + i.amount, 0);
-  const totalOut = items.filter((item) => item.status === "POSTED" && item.direction === "OUT").reduce((s, i) => s + i.amount, 0);
-  return <div className="stack-lg"><section className="mini-metrics"><Metric label="Tổng thu đã ghi sổ" value={formatMoney(totalIn)} hint="Giao dịch IN" tone="green" /><Metric label="Tổng chi đã ghi sổ" value={formatMoney(totalOut)} hint="Giao dịch OUT" tone="orange" /><Metric label="Tiền ròng" value={formatMoney(totalIn - totalOut)} hint="Thu trừ chi" tone="ink" /></section>
-    <div className="panel"><PanelHeader title="Giao dịch tiền" subtitle="Mỗi giao dịch có thể được gom vào một lần đối soát" count={items.length} /><DataTable headers={["Giao dịch", "Ngày", "Seller", "Số tiền", "Phương thức", "Trạng thái", ""]} empty="Chưa có giao dịch tiền">
-      {items.map((item) => <tr key={item.id}><td><strong>{item.transactionType}</strong><small>#{item.id} · {formatDateTime(item.occurredAt)}</small></td><td>{formatDate(item.businessDate)}</td><td>{item.sellerId ? `#${item.sellerId}` : "Tại quầy"}</td><td className={item.direction === "IN" ? "positive" : "negative"}>{item.direction === "IN" ? "+" : "−"}{formatMoney(item.amount)}</td><td>{item.paymentMethod}</td><td><Status value={item.status} /></td><td>{isManager && item.status === "PENDING" && <button className="table-action" onClick={() => onAction(`/api/v1/cash-transactions/${item.id}/post`, "Đã ghi sổ giao dịch")}>Ghi sổ</button>}</td></tr>)}
+function CashView({ items, sellers, isManager, onAction }: { items: CashTransaction[]; sellers: Seller[]; isManager: boolean; onAction: Action }) {
+  const [dateFilter, setDateFilter] = useState(""); const [statusFilter, setStatusFilter] = useState(""); const [sellerFilter, setSellerFilter] = useState("");
+  const filtered = items.filter((item) => (!dateFilter || item.businessDate === dateFilter) && (!statusFilter || item.status === statusFilter) && (!sellerFilter || (sellerFilter === "COUNTER" ? !item.sellerId : item.sellerId === Number(sellerFilter))));
+  const totalIn = filtered.filter((item) => item.status === "POSTED" && item.direction === "IN").reduce((sum, item) => sum + item.amount, 0);
+  const totalOut = filtered.filter((item) => item.status === "POSTED" && item.direction === "OUT").reduce((sum, item) => sum + item.amount, 0);
+  const sellerName = (id?: number) => id ? sellers.find((seller) => seller.id === id)?.fullName ?? `Seller #${id}` : "Tại quầy";
+  return <div className="stack-lg"><section className="mini-metrics"><Metric label="Tổng thu đã ghi sổ" value={formatMoney(totalIn)} hint="Theo bộ lọc hiện tại" tone="green" /><Metric label="Tổng chi đã ghi sổ" value={formatMoney(totalOut)} hint="Bao gồm chi phí và đại lý" tone="orange" /><Metric label="Tiền ròng" value={formatMoney(totalIn - totalOut)} hint="Thu trừ chi" tone="ink" /></section>
+    <div className="panel"><PanelHeader title="Giao dịch tiền" subtitle="Chỉ giao dịch đã ghi sổ và liên quan bán vé mới tính vào đối soát" count={filtered.length} /><div className="filter-row cash-filters"><label>Ngày bán<input type="date" value={dateFilter} onChange={(event) => setDateFilter(event.target.value)} /></label><label>Trạng thái<select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value)}><option value="">Tất cả</option><option value="PENDING">Chờ xác nhận</option><option value="POSTED">Đã ghi sổ</option><option value="VOID">Đã hủy</option></select></label>{isManager && <label>Phạm vi<select value={sellerFilter} onChange={(event) => setSellerFilter(event.target.value)}><option value="">Tất cả</option><option value="COUNTER">Tại quầy</option>{sellers.map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></label>}</div><DataTable headers={["Giao dịch", "Ngày", "Seller", "Số tiền", "Phương thức", "Đối soát", "Trạng thái", ""]} empty="Chưa có giao dịch phù hợp">
+      {filtered.map((item) => <tr key={item.id}><td><strong>{CASH_TYPE_LABELS[item.transactionType] ?? item.transactionType}</strong><small>#{item.id} · {formatDateTime(item.occurredAt)}</small></td><td>{formatDate(item.businessDate)}</td><td>{sellerName(item.sellerId)}</td><td className={item.direction === "IN" ? "positive" : "negative"}>{item.direction === "IN" ? "+" : "−"}{formatMoney(item.amount)}</td><td>{PAYMENT_LABELS[item.paymentMethod] ?? item.paymentMethod}</td><td>{item.reconciliationId ? `#${item.reconciliationId}` : "Chưa gắn"}</td><td><Status value={item.status} /></td><td><div className="inline-actions">{isManager && item.status === "PENDING" && <button className="table-action" onClick={() => void onAction(`/api/v1/cash-transactions/${item.id}/post`, "Đã ghi sổ giao dịch")}>Ghi sổ</button>}{isManager && item.status !== "VOID" && !item.reconciliationId && <button className="table-action danger-link" onClick={() => { if (window.confirm("Hủy giao dịch này?")) void onAction(`/api/v1/cash-transactions/${item.id}/void`, "Đã hủy giao dịch"); }}>Hủy</button>}</div></td></tr>)}
     </DataTable></div></div>;
 }
 
-function ReconciliationView({ items, sellers, isOwner, onAction, notify, reload }: { items: Reconciliation[]; sellers: Seller[]; isOwner: boolean; onAction: (path: string, success: string) => Promise<void>; notify: (tone: "success" | "error", message: string) => void; reload: () => Promise<void> }) {
-  const [date, setDate] = useState(today()); const [scope, setScope] = useState("STORE"); const [sellerId, setSellerId] = useState(""); const [preview, setPreview] = useState<Preview>(); const [loading, setLoading] = useState(false);
-  const loadPreview = async () => { setLoading(true); try { setPreview(await api<Preview>(`/api/v1/reconciliations/preview?businessDate=${date}&scope=${scope}${scope === "SELLER" ? `&sellerId=${sellerId}` : ""}`)); } catch (error) { notify("error", error instanceof Error ? error.message : "Không thể xem trước"); } finally { setLoading(false); } };
-  const close = async () => { try { await api("/api/v1/reconciliations/close", { method: "POST", body: JSON.stringify({ businessDate: date, scope, sellerId: scope === "SELLER" ? Number(sellerId) : null, note: preview?.differenceAmount ? "Chênh lệch cần kiểm tra" : null }) }); notify("success", "Đã tạo đối soát và snapshot doanh thu"); await reload(); } catch (error) { notify("error", error instanceof Error ? error.message : "Không thể chốt đối soát"); } };
-  return <div className="stack-lg"><div className="panel reconciliation-builder"><PanelHeader title="Đối soát trong ngày" subtitle="Xem trước số vé, tiền dự kiến và tiền thực nhận trước khi chốt" /><div className="filter-row"><label>Ngày bán<input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></label><label>Phạm vi<select value={scope} onChange={(e) => setScope(e.target.value)}><option value="STORE">Toàn cửa hàng</option><option value="SELLER">Theo seller</option></select></label>{scope === "SELLER" && <label>Seller<select value={sellerId} onChange={(e) => setSellerId(e.target.value)} required><option value="">Chọn seller</option>{sellers.map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></label>}<button className="secondary-button" onClick={loadPreview} disabled={loading || (scope === "SELLER" && !sellerId)}>{loading ? "Đang tính…" : "Xem trước"}</button></div>
-      {preview && <div className="preview-box"><div><small>Vé bán</small><strong>{number.format(preview.totalSoldQuantity)}</strong></div><div><small>Tiền dự kiến</small><strong>{formatMoney(preview.expectedAmount)}</strong></div><div><small>Tiền thực nhận</small><strong>{formatMoney(preview.actualReceivedAmount)}</strong></div><div><small>Chênh lệch</small><strong className={preview.differenceAmount === 0 ? "positive" : "negative"}>{formatMoney(preview.differenceAmount)}</strong></div><button className="primary-button" onClick={close}>Chốt đối soát</button></div>}
+function ReconciliationView({ items, sellers, isManager, isOwner, currentSellerId, onAction, notify, reload }: { items: Reconciliation[]; sellers: Seller[]; isManager: boolean; isOwner: boolean; currentSellerId?: number; onAction: Action; notify: (tone: "success" | "error", message: string) => void; reload: () => Promise<void> }) {
+  const [date, setDate] = useState(today()); const [scope, setScope] = useState(isManager ? "STORE" : "SELLER"); const [sellerId, setSellerId] = useState(isManager ? "" : String(currentSellerId ?? "")); const [preview, setPreview] = useState<Preview>(); const [reason, setReason] = useState(""); const [loading, setLoading] = useState(false);
+  const loadPreview = async () => { setLoading(true); setReason(""); try { setPreview(await api<Preview>(`/api/v1/reconciliations/preview?businessDate=${date}&scope=${scope}${scope === "SELLER" ? `&sellerId=${sellerId}` : ""}`)); } catch (error) { notify("error", error instanceof Error ? error.message : "Không thể xem trước"); } finally { setLoading(false); } };
+  const close = async () => { if (preview?.differenceAmount && !reason.trim()) { notify("error", "Vui lòng nhập lý do chênh lệch"); return; } try { await api("/api/v1/reconciliations/close", { method: "POST", body: JSON.stringify({ businessDate: date, scope, sellerId: scope === "SELLER" ? Number(sellerId) : null, note: preview?.differenceAmount ? reason.trim() : null }) }); notify("success", "Đã tạo đối soát và snapshot doanh thu"); setPreview(undefined); setReason(""); await reload(); } catch (error) { notify("error", error instanceof Error ? error.message : "Không thể chốt đối soát"); } };
+  const changeScope = (value: string) => { setScope(value); setSellerId(value === "SELLER" ? "" : sellerId); setPreview(undefined); setReason(""); };
+  return <div className="stack-lg"><div className="panel reconciliation-builder"><PanelHeader title="Đối soát trong ngày" subtitle={isManager ? "Chốt seller trước, sau đó chốt toàn cửa hàng" : "Bạn có thể xem đối soát của chính mình; quản lý là người thực hiện chốt"} /><div className="filter-row"><label>Ngày bán<input type="date" value={date} onChange={(event) => { setDate(event.target.value); setPreview(undefined); }} /></label>{isManager ? <label>Phạm vi<select value={scope} onChange={(event) => changeScope(event.target.value)}><option value="STORE">Toàn cửa hàng</option><option value="SELLER">Theo seller</option></select></label> : <label>Phạm vi<input value="Seller của tôi" disabled /></label>}{scope === "SELLER" && isManager && <label>Seller<select value={sellerId} onChange={(event) => { setSellerId(event.target.value); setPreview(undefined); }} required><option value="">Chọn seller</option>{sellers.filter((seller) => seller.status === "ACTIVE").map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></label>}<button className="secondary-button" onClick={() => void loadPreview()} disabled={loading || (scope === "SELLER" && !sellerId)}>{loading ? "Đang tính…" : "Xem trước"}</button></div>
+      {preview && <><div className="preview-box"><div><small>Vé bán</small><strong>{number.format(preview.totalSoldQuantity)}</strong></div><div><small>Tiền dự kiến</small><strong>{formatMoney(preview.expectedAmount)}</strong></div><div><small>Tiền thực nhận</small><strong>{formatMoney(preview.actualReceivedAmount)}</strong></div><div><small>Chênh lệch</small><strong className={preview.differenceAmount === 0 ? "positive" : "negative"}>{formatMoney(preview.differenceAmount)}</strong></div>{isManager && <button className="primary-button" onClick={() => void close()}>Chốt đối soát</button>}</div>{preview.sellerReconciliationAmount > 0 && <p className="carried-amount">Trong tiền thực nhận có {formatMoney(preview.sellerReconciliationAmount)} từ các đối soát seller đã đóng.</p>}{preview.differenceAmount !== 0 && isManager && <div className="reconciliation-reason"><Field label="Lý do chênh lệch (bắt buộc)"><textarea rows={3} value={reason} onChange={(event) => setReason(event.target.value)} placeholder="Ví dụ: seller còn thiếu 20.000đ, chờ bổ sung ngày mai" required /></Field></div>}<div className="reconciliation-details"><div><h3>Chi tiết vé</h3><DataTable headers={["Kỳ vé", "Gốc", "Trả", "Mất", "Đã bán", "Giá bán", "Dự kiến"]} empty="Không có biến động vé"><>{preview.lines.map((line) => <tr key={line.batchLineId}><td><strong>{line.provinceCode}</strong><small>{formatDate(line.drawDate)}</small></td><td>{number.format(line.baseQuantity)}</td><td>{number.format(line.returnedQuantity)}</td><td>{number.format(line.lostQuantity)}</td><td>{number.format(line.soldQuantity)}</td><td>{formatMoney(line.unitSalePrice)}</td><td>{formatMoney(line.expectedAmount)}</td></tr>)}</></DataTable></div><div><h3>Tiền sẽ được gom</h3><DataTable headers={["Giao dịch", "Thời điểm", "Chiều", "Số tiền", "Phương thức"]} empty="Chưa có giao dịch tiền tại phạm vi này"><>{preview.cashTransactions.map((cash) => <tr key={cash.id}><td><strong>{CASH_TYPE_LABELS[cash.transactionType]}</strong><small>#{cash.id}</small></td><td>{formatDateTime(cash.occurredAt)}</td><td>{cash.direction === "IN" ? "Thu" : "Chi"}</td><td className={cash.direction === "IN" ? "positive" : "negative"}>{cash.direction === "IN" ? "+" : "−"}{formatMoney(cash.amount)}</td><td>{PAYMENT_LABELS[cash.paymentMethod]}</td></tr>)}</></DataTable></div></div></>}
     </div>
-    <div className="panel"><PanelHeader title="Lịch sử đối soát" subtitle="Snapshot không thể chỉnh sửa trực tiếp sau khi chốt" count={items.length} /><DataTable headers={["Ngày", "Phạm vi", "Dự kiến", "Thực nhận", "Chênh lệch", "Trạng thái", ""]} empty="Chưa có lần đối soát">
-      {items.map((item) => <tr key={item.id}><td><strong>{formatDate(item.businessDate)}</strong><small>Lần #{item.revision}</small></td><td>{item.scope}{item.sellerId ? ` #${item.sellerId}` : ""}</td><td>{formatMoney(item.expectedAmount)}</td><td>{formatMoney(item.actualReceivedAmount)}</td><td className={item.differenceAmount === 0 ? "positive" : "negative"}>{formatMoney(item.differenceAmount)}</td><td><Status value={item.status} /></td><td>{isOwner && item.status === "REVIEW_REQUIRED" && <button className="table-action" onClick={() => onAction(`/api/v1/reconciliations/${item.id}/approve`, "Đã duyệt đối soát")}>Duyệt</button>}</td></tr>)}
+    <div className="panel"><PanelHeader title="Lịch sử đối soát" subtitle="Snapshot không thể chỉnh sửa trực tiếp sau khi chốt" count={items.length} /><DataTable headers={["Ngày", "Phạm vi", "Dự kiến", "Thực nhận", "Chênh lệch", "Giao dịch", "Trạng thái", ""]} empty="Chưa có lần đối soát">
+      {items.map((item) => <tr key={item.id}><td><strong>{formatDate(item.businessDate)}</strong><small>Lần #{item.revision}</small></td><td>{item.scope === "STORE" ? "Cửa hàng" : sellers.find((seller) => seller.id === item.sellerId)?.fullName ?? `Seller #${item.sellerId}`}</td><td>{formatMoney(item.expectedAmount)}</td><td>{formatMoney(item.actualReceivedAmount)}</td><td className={item.differenceAmount === 0 ? "positive" : "negative"}>{formatMoney(item.differenceAmount)}</td><td>{number.format(item.cashTransactionIds?.length ?? 0)}</td><td><Status value={item.status} /></td><td><div className="inline-actions">{isOwner && item.status === "REVIEW_REQUIRED" && <><button className="table-action" onClick={() => void onAction(`/api/v1/reconciliations/${item.id}/approve`, "Đã duyệt đối soát")}>Duyệt</button><button className="table-action danger-link" onClick={() => { if (window.confirm("Từ chối đối soát và mở lại dữ liệu để chỉnh sửa?")) void onAction(`/api/v1/reconciliations/${item.id}/reject`, "Đã từ chối và mở lại dữ liệu"); }}>Từ chối</button></>}</div></td></tr>)}
     </DataTable></div></div>;
 }
 
@@ -432,24 +488,41 @@ function CatalogView({ agencies, draws }: { agencies: Agency[]; draws: Draw[] })
     <div className="panel"><PanelHeader title="Kỳ vé đã ghi nhận" subtitle="Hệ thống tự tạo khi cửa hàng nhận lô vé từ đại lý" count={draws.length} /><div className="card-list">{draws.length ? draws.map((draw) => <article className="entity-card" key={draw.id}><div className="date-tile"><strong>{draw.drawDate.slice(8, 10)}</strong><small>Th.{draw.drawDate.slice(5, 7)}</small></div><div><strong>{draw.issuerName}</strong><small>{draw.provinceCode} · {draw.region} · Hạn trả {formatDateTime(draw.returnCutoffAt)}</small></div><Status value={draw.status} /></article>) : <Empty text="Kỳ vé sẽ xuất hiện sau khi nhận lô đầu tiên" />}</div></div></section></div>;
 }
 
-function TeamView({ users, sellers, isOwner, onOpen }: { users: User[]; sellers: Seller[]; isOwner: boolean; onOpen: (kind: ModalKind) => void }) {
-  return <div className="stack-lg"><div className="section-actions">{isOwner && <button className="secondary-button" onClick={() => onOpen("user")}>＋ Tạo tài khoản</button>}<button className="primary-button" onClick={() => onOpen("seller")}>＋ Thêm seller</button></div><section className="two-column equal">{isOwner && <div className="panel"><PanelHeader title="Tài khoản" subtitle="Phân quyền owner, manager và seller" count={users.length} /><div className="card-list">{users.length ? users.map((user) => <article className="entity-card" key={user.id}><div className="entity-avatar pale">{user.fullName.slice(0, 2).toUpperCase()}</div><div><strong>{user.fullName}</strong><small>@{user.username} · {user.roles.join(", ")}</small></div><Status value={user.status} /></article>) : <Empty text="Chưa có tài khoản" />}</div></div>}
-    <div className="panel"><PanelHeader title="Người bán" subtitle="Nhân sự nhận vé và giao tiền" count={sellers.length} /><div className="card-list">{sellers.length ? sellers.map((seller) => <article className="entity-card" key={seller.id}><div className="entity-avatar">{seller.code.slice(0, 2)}</div><div><strong>{seller.fullName}</strong><small>{seller.code} · {seller.phone || "Chưa có SĐT"}</small></div><Status value={seller.status} /></article>) : <Empty text="Chưa có seller" />}</div></div></section></div>;
+function TeamView({ users, sellers, isOwner, currentUserId, onOpen, onEditSeller, onAction }: { users: User[]; sellers: Seller[]; isOwner: boolean; currentUserId?: number; onOpen: (kind: ModalKind) => void; onEditSeller: (seller: Seller) => void; onAction: Action }) {
+  return <div className="stack-lg"><div className="section-actions">{isOwner && <button className="secondary-button" onClick={() => onOpen("user")}>＋ Tạo tài khoản</button>}<button className="primary-button" onClick={() => onOpen("seller")}>＋ Thêm người bán</button></div><section className="two-column equal">{isOwner && <div className="panel"><PanelHeader title="Tài khoản" subtitle="Tên đăng nhập là duy nhất trên toàn hệ thống" count={users.length} /><div className="card-list">{users.length ? users.map((user) => <article className="entity-card with-actions" key={user.id}><div className="entity-avatar pale">{user.fullName.slice(0, 2).toUpperCase()}</div><div><strong>{user.fullName}</strong><small>@{user.username} · {user.roles.join(", ")}</small></div><div className="entity-actions"><Status value={user.status} /><button className="table-action" disabled={user.id === currentUserId && user.status === "ACTIVE"} title={user.id === currentUserId ? "Không thể vô hiệu hóa tài khoản đang đăng nhập" : undefined} onClick={() => { const disabling = user.status === "ACTIVE"; if (!disabling || window.confirm(`Vô hiệu hóa tài khoản @${user.username}?`)) void onAction(`/api/v1/users/${user.id}/status`, disabling ? "Đã vô hiệu hóa tài khoản" : "Đã kích hoạt tài khoản", "PATCH", { status: disabling ? "DISABLED" : "ACTIVE" }); }}>{user.status === "ACTIVE" ? "Vô hiệu hóa" : "Kích hoạt"}</button></div></article>) : <Empty text="Chưa có tài khoản" />}</div></div>}
+    <div className="panel"><PanelHeader title="Người bán" subtitle="Mã seller là duy nhất trong cửa hàng" count={sellers.length} /><div className="card-list">{sellers.length ? sellers.map((seller) => <article className="entity-card with-actions" key={seller.id}><div className="entity-avatar">{seller.code.slice(0, 2)}</div><div><strong>{seller.fullName}</strong><small>{seller.code} · {seller.phone || "Chưa có SĐT"}{seller.userId ? ` · Tài khoản #${seller.userId}` : " · Chưa liên kết tài khoản"}</small></div><div className="entity-actions"><Status value={seller.status} /><div className="inline-actions"><button className="table-action" onClick={() => onEditSeller(seller)}>Sửa</button><button className={`table-action ${seller.status === "ACTIVE" ? "danger-link" : ""}`} onClick={() => { const stopping = seller.status === "ACTIVE"; if (!stopping || window.confirm(`Ngưng hoạt động seller ${seller.fullName}?`)) void onAction(`/api/v1/sellers/${seller.id}/status`, stopping ? "Đã ngưng hoạt động seller" : "Đã kích hoạt seller", "PATCH", { status: stopping ? "INACTIVE" : "ACTIVE" }); }}>{seller.status === "ACTIVE" ? "Ngưng" : "Kích hoạt"}</button></div></div></article>) : <Empty text="Chưa có seller" />}</div></div></section></div>;
 }
 
-function EntityModal({ kind, snapshot, onClose, onCreated }: { kind: ModalKind; snapshot: Snapshot; onClose: () => void; onCreated: (message: string) => Promise<void> }) {
+function SellerEditModal({ seller, users, sellers, onClose, onSaved }: { seller: Seller; users: User[]; sellers: Seller[]; onClose: () => void; onSaved: () => Promise<void> }) {
+  const [saving, setSaving] = useState(false); const [error, setError] = useState(""); const [fullName, setFullName] = useState(seller.fullName); const [code, setCode] = useState(seller.code); const [phone, setPhone] = useState(seller.phone ?? ""); const [userId, setUserId] = useState(seller.userId ? String(seller.userId) : "");
+  const availableUsers = users.filter((user) => user.roles.includes("SELLER") && (user.id === seller.userId || (user.status === "ACTIVE" && !sellers.some((item) => item.id !== seller.id && item.userId === user.id))));
+  const submit = async (event: FormEvent<HTMLFormElement>) => { event.preventDefault(); setSaving(true); setError(""); try { await api(`/api/v1/sellers/${seller.id}`, { method: "PUT", body: JSON.stringify({ userId: userId ? Number(userId) : null, code, fullName, phone: phone || null }) }); await onSaved(); } catch (reason) { setError(reason instanceof Error ? reason.message : "Không thể cập nhật seller"); } finally { setSaving(false); } };
+  return <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="modal-card compact" role="dialog" aria-modal="true" aria-label="Chỉnh sửa seller"><header><div><p className="eyebrow">Nhân sự</p><h2>Chỉnh sửa seller</h2></div><button className="close-button" onClick={onClose} aria-label="Đóng">×</button></header><form className="modal-form" onSubmit={submit}><Field label="Họ và tên"><input value={fullName} onChange={(event) => setFullName(event.target.value)} required /></Field><div className="form-grid"><Field label="Mã seller"><input value={code} onChange={(event) => setCode(event.target.value)} required /></Field><Field label="Số điện thoại"><input value={phone} onChange={(event) => setPhone(event.target.value)} inputMode="tel" /></Field></div><Field label="Tài khoản seller"><select value={userId} onChange={(event) => setUserId(event.target.value)}><option value="">Chưa liên kết</option>{availableUsers.map((user) => <option key={user.id} value={user.id}>{user.fullName} (@{user.username})</option>)}</select></Field>{error && <p className="form-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose}>Hủy</button><button className="primary-button" disabled={saving}>{saving ? "Đang lưu…" : "Lưu thay đổi"}</button></footer></form></section></div>;
+}
+
+function EntityModal({ kind, snapshot, isManager, isOwner, currentSellerId, onClose, onCreated }: { kind: ModalKind; snapshot: Snapshot; isManager: boolean; isOwner: boolean; currentSellerId?: number; onClose: () => void; onCreated: (message: string) => Promise<void> }) {
   const [saving, setSaving] = useState(false); const [error, setError] = useState("");
   const [returnType, setReturnType] = useState("SELLER_TO_STORE");
-  const [holderType, setHolderType] = useState("STORE");
+  const [holderType, setHolderType] = useState(isManager ? "STORE" : "SELLER");
+  const [cashType, setCashType] = useState("SALES_COLLECTION");
+  const [cashDirection, setCashDirection] = useState("IN");
+  const [createSellerLogin, setCreateSellerLogin] = useState(false);
   const [batchLines, setBatchLines] = useState<BatchLineDraft[]>([emptyBatchLine(1)]);
   const [batchMeta, setBatchMeta] = useState({ agencyId: "", receiptCode: "", businessDate: today(), receivedAt: nowLocal(), note: "" });
   const [entryMode, setEntryMode] = useState<"manual" | "file">("manual");
   const [importFile, setImportFile] = useState<File | null>(null);
   const [importing, setImporting] = useState(false);
   const [importWarnings, setImportWarnings] = useState<string[]>([]);
-  const title: Record<ModalKind, string> = { agency: "Thêm đại lý", user: "Tạo tài khoản", seller: "Thêm seller", batch: "Nhận lô vé", allocation: "Giao vé cho seller", return: "Tạo phiếu trả", adjustment: "Báo điều chỉnh tồn", cash: "Thêm giao dịch tiền" };
+  const title: Record<ModalKind, string> = { agency: "Thêm đại lý", user: "Tạo tài khoản", seller: "Thêm người bán", batch: "Nhận lô vé", allocation: "Giao vé cho seller", return: "Tạo phiếu trả", adjustment: "Báo điều chỉnh tồn", cash: "Thêm giao dịch tiền" };
   const confirmedLines = snapshot.batches.filter((batch) => batch.status === "CONFIRMED").flatMap((batch) => batch.lines.map((line) => ({ ...line, receiptCode: batch.receiptCode })));
   const issuedLines = snapshot.allocations.filter((allocation) => allocation.status === "ISSUED").flatMap((allocation) => allocation.lines.map((line) => ({ ...line, sellerId: allocation.sellerId, sellerName: allocation.sellerName })));
+  const sellerUsers = snapshot.users.filter((user) => user.status === "ACTIVE" && user.roles.includes("SELLER") && !snapshot.sellers.some((seller) => seller.userId === user.id));
+
+  const changeCashType = (value: string) => {
+    setCashType(value);
+    if (value === "SALES_COLLECTION") setCashDirection("IN");
+    if (["REFUND", "EXPENSE", "AGENCY_PAYMENT"].includes(value)) setCashDirection("OUT");
+  };
 
   const updateBatchLine = (key: number, field: Exclude<keyof BatchLineDraft, "key">, value: string) => {
     setBatchLines((lines) => lines.map((line) => line.key === key ? { ...line, [field]: value } : line));
@@ -495,12 +568,12 @@ function EntityModal({ kind, snapshot, onClose, onCreated }: { kind: ModalKind; 
     try {
       if (kind === "agency") { path = "/api/v1/agencies"; payload = { code: value("code"), name: value("name"), contactName: value("contactName") || null, phone: value("phone") || null }; message = "Đã thêm đại lý"; }
       if (kind === "user") { path = "/api/v1/users"; payload = { username: value("username"), password: value("password"), fullName: value("fullName"), roles: form.getAll("roles") }; message = "Đã tạo tài khoản"; }
-      if (kind === "seller") { path = "/api/v1/sellers"; payload = { userId: value("userId") ? Number(value("userId")) : null, code: value("code"), fullName: value("fullName"), phone: value("phone") || null }; message = "Đã thêm seller"; }
+      if (kind === "seller") { path = "/api/v1/sellers"; payload = { userId: createSellerLogin ? null : value("userId") ? Number(value("userId")) : null, code: value("code"), fullName: value("fullName"), phone: value("phone") || null, loginAccount: createSellerLogin ? { username: value("loginUsername"), password: value("loginPassword") } : null }; message = createSellerLogin ? "Đã tạo người bán và tài khoản đăng nhập" : "Đã thêm người bán"; }
       if (kind === "batch") { path = "/api/v1/batches"; payload = { agencyId: Number(value("agencyId")), receiptCode: value("receiptCode"), businessDate: value("businessDate"), receivedAt: new Date(value("receivedAt")).toISOString(), note: value("note") || null, lines: batchLines.map((line) => ({ issuerName: line.issuerName, provinceCode: line.provinceCode, region: line.region, drawDate: line.drawDate, returnCutoffAt: new Date(line.returnCutoffAt).toISOString(), quantityReceived: Number(line.quantityReceived), unitCost: Number(line.unitCost), unitSalePrice: Number(line.unitSalePrice), serialFrom: line.serialFrom || null, serialTo: line.serialTo || null })) }; message = "Đã tạo lô vé bản nháp và ghi nhận kỳ vé"; }
       if (kind === "allocation") { path = "/api/v1/allocations"; payload = { sellerId: Number(value("sellerId")), businessDate: value("businessDate"), note: value("note") || null, lines: [{ batchLineId: Number(value("batchLineId")), quantity: Number(value("quantity")) }] }; message = "Đã tạo phiếu giao vé"; }
-      if (kind === "return") { path = "/api/v1/returns"; const allocationLine = issuedLines.find((line) => line.id === Number(value("allocationLineId"))); payload = { returnType, sellerId: returnType === "SELLER_TO_STORE" ? Number(value("sellerId")) : null, agencyId: returnType === "STORE_TO_AGENCY" ? Number(value("agencyId")) : null, businessDate: value("businessDate"), note: value("note") || null, lines: [{ batchLineId: returnType === "SELLER_TO_STORE" ? allocationLine?.batchLineId : Number(value("batchLineId")), allocationLineId: returnType === "SELLER_TO_STORE" ? Number(value("allocationLineId")) : null, quantity: Number(value("quantity")) }] }; message = "Đã tạo phiếu trả vé"; }
-      if (kind === "adjustment") { path = "/api/v1/inventory-adjustments"; const allocationLine = issuedLines.find((line) => line.id === Number(value("allocationLineId"))); payload = { batchLineId: holderType === "SELLER" ? allocationLine?.batchLineId : Number(value("batchLineId")), holderType, sellerId: holderType === "SELLER" ? Number(value("sellerId")) : null, allocationLineId: holderType === "SELLER" ? Number(value("allocationLineId")) : null, adjustmentType: value("adjustmentType"), direction: value("direction"), quantity: Number(value("quantity")), reason: value("reason") }; message = "Đã gửi điều chỉnh chờ duyệt"; }
-      if (kind === "cash") { path = "/api/v1/cash-transactions"; payload = { sellerId: value("sellerId") ? Number(value("sellerId")) : null, businessDate: value("businessDate"), direction: value("direction"), transactionType: value("transactionType"), paymentMethod: value("paymentMethod"), amount: Number(value("amount")), occurredAt: new Date(value("occurredAt")).toISOString(), note: value("note") || null }; message = "Đã tạo giao dịch chờ ghi sổ"; }
+      if (kind === "return") { path = "/api/v1/returns"; const allocationLine = issuedLines.find((line) => line.id === Number(value("allocationLineId"))); payload = { returnType, sellerId: returnType === "SELLER_TO_STORE" ? isManager ? Number(value("sellerId")) : currentSellerId : null, agencyId: returnType === "STORE_TO_AGENCY" ? Number(value("agencyId")) : null, businessDate: value("businessDate"), note: value("note") || null, lines: [{ batchLineId: returnType === "SELLER_TO_STORE" ? allocationLine?.batchLineId : Number(value("batchLineId")), allocationLineId: returnType === "SELLER_TO_STORE" ? Number(value("allocationLineId")) : null, quantity: Number(value("quantity")) }] }; message = "Đã tạo phiếu trả vé"; }
+      if (kind === "adjustment") { path = "/api/v1/inventory-adjustments"; const allocationLine = issuedLines.find((line) => line.id === Number(value("allocationLineId"))); payload = { batchLineId: holderType === "SELLER" ? allocationLine?.batchLineId : Number(value("batchLineId")), holderType, sellerId: holderType === "SELLER" ? isManager ? Number(value("sellerId")) : currentSellerId : null, allocationLineId: holderType === "SELLER" ? Number(value("allocationLineId")) : null, adjustmentType: value("adjustmentType"), direction: value("direction"), quantity: Number(value("quantity")), reason: value("reason") }; message = "Đã gửi điều chỉnh chờ duyệt"; }
+      if (kind === "cash") { path = "/api/v1/cash-transactions"; payload = { sellerId: isManager ? (value("sellerId") ? Number(value("sellerId")) : null) : currentSellerId ?? null, businessDate: value("businessDate"), direction: cashDirection, transactionType: cashType, paymentMethod: value("paymentMethod"), amount: Number(value("amount")), occurredAt: new Date(value("occurredAt")).toISOString(), note: value("note") || null }; message = "Đã tạo giao dịch chờ ghi sổ"; }
       await api(path, { method: "POST", body: JSON.stringify(payload) }); await onCreated(message);
     } catch (reason) { setError(reason instanceof Error ? reason.message : "Không thể lưu dữ liệu"); }
     finally { setSaving(false); }
@@ -509,7 +582,7 @@ function EntityModal({ kind, snapshot, onClose, onCreated }: { kind: ModalKind; 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="modal-card" role="dialog" aria-modal="true" aria-label={title[kind]}><header><div><p className="eyebrow">Nhập liệu</p><h2>{title[kind]}</h2></div><button className="close-button" onClick={onClose} aria-label="Đóng">×</button></header><form onSubmit={submit} className="modal-form">
     {kind === "agency" && <><Field label="Mã đại lý"><input name="code" placeholder="DL01" required /></Field><Field label="Tên đại lý"><input name="name" placeholder="Đại lý Minh Tâm" required /></Field><div className="form-grid"><Field label="Người liên hệ"><input name="contactName" /></Field><Field label="Số điện thoại"><input name="phone" inputMode="tel" /></Field></div></>}
     {kind === "user" && <><Field label="Họ và tên"><input name="fullName" required /></Field><div className="form-grid"><Field label="Tên đăng nhập"><input name="username" autoComplete="off" required /></Field><Field label="Mật khẩu"><input type="password" name="password" minLength={8} autoComplete="new-password" required /></Field></div><fieldset><legend>Vai trò</legend><div className="check-row"><label><input type="checkbox" name="roles" value="MANAGER" /> Quản lý</label><label><input type="checkbox" name="roles" value="SELLER" /> Seller</label><label><input type="checkbox" name="roles" value="OWNER" /> Owner</label></div></fieldset></>}
-    {kind === "seller" && <><Field label="Họ và tên"><input name="fullName" required /></Field><div className="form-grid"><Field label="Mã seller"><input name="code" placeholder="NV01" required /></Field><Field label="Số điện thoại"><input name="phone" inputMode="tel" /></Field></div><Field label="Liên kết tài khoản (không bắt buộc)"><select name="userId"><option value="">Chưa liên kết</option>{snapshot.users.map((user) => <option key={user.id} value={user.id}>{user.fullName} (@{user.username})</option>)}</select></Field></>}
+    {kind === "seller" && <><Field label="Họ và tên"><input name="fullName" required /></Field><div className="form-grid"><Field label="Mã người bán"><input name="code" placeholder="NV01" required /></Field><Field label="Số điện thoại"><input name="phone" inputMode="tel" /></Field></div>{isOwner && <label className="login-toggle"><input type="checkbox" checked={createSellerLogin} onChange={(event) => setCreateSellerLogin(event.target.checked)} /><span><strong>Tạo luôn tài khoản đăng nhập</strong><small>Tài khoản được tự cấp role SELLER và liên kết với người bán này.</small></span></label>}{createSellerLogin ? <div className="account-fields"><div className="form-grid"><Field label="Tên đăng nhập"><input name="loginUsername" autoComplete="off" required /></Field><Field label="Mật khẩu ban đầu"><input type="password" name="loginPassword" minLength={8} autoComplete="new-password" required /></Field></div><p className="form-hint">Tên đăng nhập không được trùng trên toàn hệ thống. Người bán có thể dùng tài khoản ngay sau khi tạo.</p></div> : <><Field label="Liên kết tài khoản SELLER có sẵn (không bắt buộc)"><select name="userId"><option value="">Chưa liên kết</option>{sellerUsers.map((user) => <option key={user.id} value={user.id}>{user.fullName} (@{user.username})</option>)}</select></Field>{!isOwner && <p className="form-hint">Manager có thể tạo hồ sơ người bán; owner sẽ tạo hoặc liên kết tài khoản đăng nhập sau.</p>}</> }</>}
     {kind === "batch" && <>
       <div className="entry-tabs" role="tablist"><button type="button" className={entryMode === "manual" ? "active" : ""} onClick={() => setEntryMode("manual")}>Nhập thủ công</button><button type="button" className={entryMode === "file" ? "active" : ""} onClick={() => setEntryMode("file")}>Tải file CSV/XLSX</button></div>
       {entryMode === "file" ? <div className="import-panel"><div className="upload-box"><strong>Chọn bảng kê từ đại lý</strong><p>Hỗ trợ CSV/XLSX, tối đa 5 MB và 500 dòng. File chỉ được đọc để xem trước, chưa lưu vào hệ thống.</p><input type="file" accept=".csv,.xlsx" onChange={(event) => setImportFile(event.target.files?.[0] ?? null)} /></div><div className="import-actions"><a href="/templates/lo-ve-mau.csv" download>Tải file mẫu</a><button type="button" className="primary-button" disabled={!importFile || importing} onClick={() => void previewImport()}>{importing ? "Đang trích xuất…" : "Trích xuất & xem trước"}</button></div></div> : <>
@@ -521,9 +594,9 @@ function EntityModal({ kind, snapshot, onClose, onCreated }: { kind: ModalKind; 
       </>}
     </>}
     {kind === "allocation" && <><div className="form-grid"><Field label="Seller"><select name="sellerId" required><option value="">Chọn seller</option>{snapshot.sellers.filter((s) => s.status === "ACTIVE").map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></Field><Field label="Ngày bán"><input type="date" name="businessDate" defaultValue={today()} required /></Field></div><Field label="Dòng vé"><select name="batchLineId" required><option value="">Chọn lô / kỳ quay</option>{confirmedLines.map((line) => <option key={line.id} value={line.id}>{line.receiptCode} · {line.provinceCode} · {formatDate(line.drawDate)}</option>)}</select></Field><Field label="Số lượng giao"><input type="number" name="quantity" min="1" defaultValue="100" required /></Field><Field label="Ghi chú"><textarea name="note" rows={2} /></Field></>}
-    {kind === "return" && <><Field label="Loại trả"><select value={returnType} onChange={(e) => setReturnType(e.target.value)}><option value="SELLER_TO_STORE">Seller trả cửa hàng</option><option value="STORE_TO_AGENCY">Cửa hàng trả đại lý</option></select></Field>{returnType === "SELLER_TO_STORE" ? <><Field label="Seller"><select name="sellerId" required><option value="">Chọn seller</option>{snapshot.sellers.map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></Field><Field label="Dòng vé đã giao"><select name="allocationLineId" required><option value="">Chọn dòng vé</option>{issuedLines.map((line) => <option key={line.id} value={line.id}>{line.sellerName} · {line.provinceCode} · {formatDate(line.drawDate)}</option>)}</select></Field></> : <><Field label="Đại lý"><select name="agencyId" required><option value="">Chọn đại lý</option>{snapshot.agencies.map((agency) => <option key={agency.id} value={agency.id}>{agency.name}</option>)}</select></Field><Field label="Dòng vé tại cửa hàng"><select name="batchLineId" required><option value="">Chọn dòng vé</option>{confirmedLines.map((line) => <option key={line.id} value={line.id}>{line.receiptCode} · {line.provinceCode}</option>)}</select></Field></>}<div className="form-grid"><Field label="Ngày bán"><input type="date" name="businessDate" defaultValue={today()} required /></Field><Field label="Số lượng"><input type="number" name="quantity" min="1" defaultValue="1" required /></Field></div><Field label="Ghi chú"><textarea name="note" rows={2} /></Field></>}
-    {kind === "adjustment" && <><div className="form-grid"><Field label="Vị trí tồn"><select value={holderType} onChange={(e) => setHolderType(e.target.value)}><option value="STORE">Tại cửa hàng</option><option value="SELLER">Tại seller</option></select></Field><Field label="Loại điều chỉnh"><select name="adjustmentType" defaultValue="LOST"><option value="LOST">Thất thoát</option><option value="DAMAGED">Hư hỏng</option><option value="FOUND">Tìm thấy</option><option value="CORRECTION">Sửa sai</option></select></Field></div>{holderType === "SELLER" ? <><Field label="Seller"><select name="sellerId" required><option value="">Chọn seller</option>{snapshot.sellers.map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></Field><Field label="Dòng vé đã giao"><select name="allocationLineId" required><option value="">Chọn dòng vé</option>{issuedLines.map((line) => <option key={line.id} value={line.id}>{line.sellerName} · {line.provinceCode}</option>)}</select></Field></> : <Field label="Dòng vé tại cửa hàng"><select name="batchLineId" required><option value="">Chọn dòng vé</option>{confirmedLines.map((line) => <option key={line.id} value={line.id}>{line.receiptCode} · {line.provinceCode}</option>)}</select></Field>}<div className="form-grid"><Field label="Chiều điều chỉnh"><select name="direction" defaultValue="DECREASE"><option value="DECREASE">Giảm tồn</option><option value="INCREASE">Tăng tồn</option></select></Field><Field label="Số lượng"><input type="number" name="quantity" min="1" defaultValue="1" required /></Field></div><Field label="Lý do"><textarea name="reason" rows={3} required /></Field></>}
-    {kind === "cash" && <><div className="form-grid"><Field label="Seller (để trống nếu tại quầy)"><select name="sellerId"><option value="">Giao dịch tại quầy</option>{snapshot.sellers.map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></Field><Field label="Ngày bán"><input type="date" name="businessDate" defaultValue={today()} required /></Field></div><div className="form-grid"><Field label="Chiều tiền"><select name="direction" defaultValue="IN"><option value="IN">Thu vào</option><option value="OUT">Chi ra</option></select></Field><Field label="Loại giao dịch"><select name="transactionType" defaultValue="SALES_COLLECTION"><option value="SALES_COLLECTION">Thu tiền bán vé</option><option value="REFUND">Hoàn tiền</option><option value="ADJUSTMENT">Điều chỉnh</option><option value="EXPENSE">Chi phí</option><option value="AGENCY_PAYMENT">Thanh toán đại lý</option></select></Field></div><div className="form-grid"><Field label="Số tiền"><input type="number" name="amount" min="1" step="1000" required /></Field><Field label="Phương thức"><select name="paymentMethod" defaultValue="CASH"><option value="CASH">Tiền mặt</option><option value="BANK_TRANSFER">Chuyển khoản</option><option value="EWALLET">Ví điện tử</option></select></Field></div><Field label="Thời điểm"><input type="datetime-local" name="occurredAt" defaultValue={nowLocal()} required /></Field><Field label="Ghi chú"><textarea name="note" rows={2} /></Field></>}
+    {kind === "return" && <>{isManager ? <Field label="Loại trả"><select value={returnType} onChange={(e) => setReturnType(e.target.value)}><option value="SELLER_TO_STORE">Seller trả cửa hàng</option><option value="STORE_TO_AGENCY">Cửa hàng trả đại lý</option></select></Field> : <Field label="Loại trả"><input value="Tôi trả vé về cửa hàng" disabled /></Field>}{returnType === "SELLER_TO_STORE" ? <>{isManager && <Field label="Seller"><select name="sellerId" required><option value="">Chọn seller</option>{snapshot.sellers.filter((seller) => seller.status === "ACTIVE").map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></Field>}<Field label="Dòng vé đã giao"><select name="allocationLineId" required><option value="">Chọn dòng vé</option>{issuedLines.map((line) => <option key={line.id} value={line.id}>{line.sellerName} · {line.provinceCode} · {formatDate(line.drawDate)}</option>)}</select></Field></> : <><Field label="Đại lý"><select name="agencyId" required><option value="">Chọn đại lý</option>{snapshot.agencies.map((agency) => <option key={agency.id} value={agency.id}>{agency.name}</option>)}</select></Field><Field label="Dòng vé tại cửa hàng"><select name="batchLineId" required><option value="">Chọn dòng vé</option>{confirmedLines.map((line) => <option key={line.id} value={line.id}>{line.receiptCode} · {line.provinceCode}</option>)}</select></Field></>}<div className="form-grid"><Field label="Ngày bán"><input type="date" name="businessDate" defaultValue={today()} required /></Field><Field label="Số lượng"><input type="number" name="quantity" min="1" defaultValue="1" required /></Field></div><Field label="Ghi chú"><textarea name="note" rows={2} /></Field></>}
+    {kind === "adjustment" && <><div className="form-grid">{isManager ? <Field label="Vị trí tồn"><select value={holderType} onChange={(e) => setHolderType(e.target.value)}><option value="STORE">Tại cửa hàng</option><option value="SELLER">Tại seller</option></select></Field> : <Field label="Vị trí tồn"><input value="Vé đang giữ của tôi" disabled /></Field>}<Field label="Loại điều chỉnh"><select name="adjustmentType" defaultValue="LOST"><option value="LOST">Thất thoát</option><option value="DAMAGED">Hư hỏng</option><option value="FOUND">Tìm thấy</option><option value="CORRECTION">Sửa sai</option></select></Field></div>{holderType === "SELLER" ? <>{isManager && <Field label="Seller"><select name="sellerId" required><option value="">Chọn seller</option>{snapshot.sellers.filter((seller) => seller.status === "ACTIVE").map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></Field>}<Field label="Dòng vé đã giao"><select name="allocationLineId" required><option value="">Chọn dòng vé</option>{issuedLines.map((line) => <option key={line.id} value={line.id}>{line.sellerName} · {line.provinceCode}</option>)}</select></Field></> : <Field label="Dòng vé tại cửa hàng"><select name="batchLineId" required><option value="">Chọn dòng vé</option>{confirmedLines.map((line) => <option key={line.id} value={line.id}>{line.receiptCode} · {line.provinceCode}</option>)}</select></Field>}<div className="form-grid"><Field label="Chiều điều chỉnh"><select name="direction" defaultValue="DECREASE"><option value="DECREASE">Giảm tồn</option><option value="INCREASE">Tăng tồn</option></select></Field><Field label="Số lượng"><input type="number" name="quantity" min="1" defaultValue="1" required /></Field></div><Field label="Lý do"><textarea name="reason" rows={3} required /></Field></>}
+    {kind === "cash" && <><div className="form-grid">{isManager ? <Field label="Seller (để trống nếu tại quầy)"><select name="sellerId"><option value="">Giao dịch tại quầy</option>{snapshot.sellers.filter((seller) => seller.status === "ACTIVE").map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></Field> : <Field label="Phạm vi"><input value="Seller của tôi" disabled /></Field>}<Field label="Ngày bán"><input type="date" name="businessDate" defaultValue={today()} required /></Field></div><div className="form-grid"><Field label="Loại giao dịch"><select value={cashType} onChange={(event) => changeCashType(event.target.value)}><option value="SALES_COLLECTION">Thu tiền bán vé</option><option value="REFUND">Hoàn tiền</option><option value="ADJUSTMENT">Điều chỉnh</option><option value="EXPENSE">Chi phí</option><option value="AGENCY_PAYMENT">Thanh toán đại lý</option></select></Field><Field label="Chiều tiền"><select value={cashDirection} onChange={(event) => setCashDirection(event.target.value)} disabled={cashType !== "ADJUSTMENT"}><option value="IN">Thu vào</option><option value="OUT">Chi ra</option></select></Field></div><p className="form-hint">Thu bán vé luôn là thu vào; hoàn tiền, chi phí và thanh toán đại lý luôn là chi ra. Chỉ điều chỉnh cho phép chọn cả hai chiều.</p><div className="form-grid"><Field label="Số tiền"><input type="number" name="amount" min="1" step="1000" required /></Field><Field label="Phương thức"><select name="paymentMethod" defaultValue="CASH"><option value="CASH">Tiền mặt</option><option value="BANK_TRANSFER">Chuyển khoản</option><option value="EWALLET">Ví điện tử</option></select></Field></div><Field label="Thời điểm"><input type="datetime-local" name="occurredAt" defaultValue={nowLocal()} required /></Field><Field label="Ghi chú"><textarea name="note" rows={2} /></Field></>}
     {error && <p className="form-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose}>Hủy</button><button className="primary-button" disabled={saving || (kind === "batch" && entryMode === "file")}>{saving ? "Đang lưu…" : "Lưu dữ liệu"}</button></footer>
   </form></section></div>;
 }
@@ -531,6 +604,6 @@ function EntityModal({ kind, snapshot, onClose, onCreated }: { kind: ModalKind; 
 function Field({ label, children }: { label: string; children: ReactNode }) { return <label className="field">{label}{children}</label>; }
 function PanelHeader({ title, subtitle, count }: { title: string; subtitle: string; count?: number }) { return <header className="panel-header"><div><h2>{title}</h2><p>{subtitle}</p></div>{count !== undefined && <span className="count-badge">{number.format(count)}</span>}</header>; }
 function Metric({ label, value, hint, tone }: { label: string; value: string; hint: string; tone: string }) { return <article className={`metric-card ${tone}`}><div className="metric-top"><span>{label}</span><i /></div><strong>{value}</strong><small>{hint}</small></article>; }
-function Status({ value }: { value: string }) { const tone = ["CONFIRMED", "POSTED", "APPROVED", "CLOSED", "ACTIVE", "ISSUED"].includes(value) ? "success" : ["PENDING", "DRAFT", "REVIEW_REQUIRED", "OPEN"].includes(value) ? "warning" : ["REJECTED", "CANCELLED", "VOIDED", "DISABLED"].includes(value) ? "danger" : "neutral"; return <span className={`status ${tone}`}>{STATUS_LABELS[value] ?? value}</span>; }
+function Status({ value }: { value: string }) { const tone = ["CONFIRMED", "POSTED", "APPROVED", "CLOSED", "ACTIVE", "ISSUED"].includes(value) ? "success" : ["PENDING", "DRAFT", "REVIEW_REQUIRED", "OPEN"].includes(value) ? "warning" : ["REJECTED", "CANCELLED", "VOID", "VOIDED", "DISABLED"].includes(value) ? "danger" : "neutral"; return <span className={`status ${tone}`}>{STATUS_LABELS[value] ?? value}</span>; }
 function Empty({ text }: { text: string }) { return <div className="empty-state"><span>∅</span><p>{text}</p></div>; }
 function DataTable({ headers, empty, children }: { headers: string[]; empty: string; children: ReactNode }) { const hasChildren = Array.isArray(children) ? children.length > 0 : Boolean(children); return hasChildren ? <div className="table-wrap"><table><thead><tr>{headers.map((header, index) => <th key={`${header}-${index}`}>{header}</th>)}</tr></thead><tbody>{children}</tbody></table></div> : <Empty text={empty} />; }

@@ -140,7 +140,7 @@ public class SalesCalculationService {
         List<Line> lines = grouped.values().stream().map(MutableLine::finish).toList();
         long expected = lines.stream().mapToLong(Line::expectedAmount).reduce(0, Math::addExact);
         long actual = cash.stream().mapToLong(CashTransaction::signedSalesAmount).reduce(carriedActual, Math::addExact);
-        return new Calculation(lines, expected, actual, Math.subtractExact(actual, expected), cash);
+        return new Calculation(lines, expected, actual, carriedActual, Math.subtractExact(actual, expected), cash);
     }
 
     private long signedLoss(InventoryAdjustment adjustment) {
@@ -163,6 +163,7 @@ public class SalesCalculationService {
             List<Line> lines,
             long expectedAmount,
             long actualReceivedAmount,
+            long sellerReconciliationAmount,
             long differenceAmount,
             List<CashTransaction> attachableCash) {
 

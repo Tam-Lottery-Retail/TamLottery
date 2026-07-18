@@ -1,5 +1,8 @@
 package com.mtriet.tamlottery.reconciliation.api;
 
+import com.mtriet.tamlottery.cash.domain.CashDirection;
+import com.mtriet.tamlottery.cash.domain.CashTransactionType;
+import com.mtriet.tamlottery.cash.domain.PaymentMethod;
 import com.mtriet.tamlottery.reconciliation.domain.DailySalesStatus;
 import com.mtriet.tamlottery.reconciliation.domain.ReconciliationStatus;
 import com.mtriet.tamlottery.reconciliation.domain.SalesScope;
@@ -36,8 +39,20 @@ public final class ReconciliationDtos {
             long totalSoldQuantity,
             long expectedAmount,
             long actualReceivedAmount,
+            long sellerReconciliationAmount,
             long differenceAmount,
-            List<SalesLineResponse> lines) {
+            List<SalesLineResponse> lines,
+            List<ReconciliationCashResponse> cashTransactions) {
+    }
+
+    public record ReconciliationCashResponse(
+            Long id,
+            Long sellerId,
+            CashDirection direction,
+            CashTransactionType transactionType,
+            PaymentMethod paymentMethod,
+            long amount,
+            Instant occurredAt) {
     }
 
     public record CloseRequest(
@@ -59,7 +74,8 @@ public final class ReconciliationDtos {
             long differenceAmount,
             ReconciliationStatus status,
             String note,
-            Instant closedAt) {
+            Instant closedAt,
+            List<Long> cashTransactionIds) {
     }
 
     public record DailySalesResponse(

@@ -9,11 +9,15 @@ import com.mtriet.tamlottery.cash.domain.PaymentMethod;
 import com.mtriet.tamlottery.common.exception.BusinessException;
 import com.mtriet.tamlottery.common.exception.ErrorCode;
 import com.mtriet.tamlottery.identity.api.AuthDtos;
+import com.mtriet.tamlottery.identity.api.IdentityDtos;
 import com.mtriet.tamlottery.identity.application.AuthService;
+import com.mtriet.tamlottery.identity.application.IdentityService;
 import com.mtriet.tamlottery.identity.domain.Role;
 import com.mtriet.tamlottery.identity.domain.Seller;
+import com.mtriet.tamlottery.identity.domain.SellerStatus;
 import com.mtriet.tamlottery.identity.domain.Store;
 import com.mtriet.tamlottery.identity.domain.UserAccount;
+import com.mtriet.tamlottery.identity.domain.UserStatus;
 import com.mtriet.tamlottery.identity.infrastructure.SellerRepository;
 import com.mtriet.tamlottery.identity.infrastructure.StoreRepository;
 import com.mtriet.tamlottery.identity.infrastructure.UserAccountRepository;
@@ -104,6 +108,9 @@ class TamLotteryBackendApplicationIT {
     private AuthService authService;
 
     @Autowired
+    private IdentityService identityService;
+
+    @Autowired
     private MasterDataService masterDataService;
 
     @Autowired
@@ -159,6 +166,122 @@ class TamLotteryBackendApplicationIT {
         assertThatThrownBy(() -> authService.refresh(first.refreshToken()))
                 .isInstanceOfSatisfying(BusinessException.class,
                         exception -> assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.UNAUTHORIZED));
+    }
+
+    @Test
+    void rejectsDuplicateUsernameIgnoringCaseAndWhitespace() {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+        int sequence = SEQUENCE.incrementAndGet();
+        String username = "cashier-" + sequence;
+
+        identityService.createUser(new IdentityDtos.CreateUserRequest(
+                username, TEST_PASSWORD, "Thu ngân", Set.of(Role.SELLER)));
+
+        assertThatThrownBy(() -> identityService.createUser(new IdentityDtos.CreateUserRequest(
+                "  " + username.toUpperCase() + "  ", TEST_PASSWORD, "Trùng tên", Set.of(Role.SELLER))))
+                .isInstanceOfSatisfying(BusinessException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.DUPLICATE_RESOURCE);
+                    assertThat(exception.getStatus().value()).isEqualTo(409);
+                });
+    }
+
+    @Test
+    void createsSellerAndLoginAccountAtomically() {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+        int sequence = SEQUENCE.incrementAndGet();
+        String username = "seller-login-" + sequence;
+        String sellerCode = "NV-LOGIN-" + sequence;
+
+        IdentityDtos.SellerResponse seller = identityService.createSeller(new IdentityDtos.CreateSellerRequest(
+                null,
+                sellerCode,
+                "Người bán có tài khoản",
+                "0909123456",
+                new IdentityDtos.CreateSellerLoginRequest(username, TEST_PASSWORD)));
+
+        UserAccount account = userRepository.findByUsernameIgnoreCase(username).orElseThrow();
+        assertThat(seller.userId()).isEqualTo(account.getId());
+        assertThat(account.getRoles()).containsExactly(Role.SELLER);
+        assertThat(sellerRepository.findByUserId(account.getId()).orElseThrow().getId()).isEqualTo(seller.id());
+        assertThat(authService.login(username, TEST_PASSWORD).accessToken()).isNotBlank();
+
+        long sellerCount = sellerRepository.count();
+        assertThatThrownBy(() -> identityService.createSeller(new IdentityDtos.CreateSellerRequest(
+                null,
+                sellerCode + "-ROLLBACK",
+                "Không được tạo dở dang",
+                null,
+                new IdentityDtos.CreateSellerLoginRequest("  " + username.toUpperCase() + "  ", TEST_PASSWORD))))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.DUPLICATE_RESOURCE));
+        assertThat(sellerRepository.count()).isEqualTo(sellerCount);
+        assertThat(sellerRepository.existsByStoreIdAndCodeIgnoreCase(
+                owner.store().getId(), sellerCode + "-ROLLBACK")).isFalse();
+    }
+
+    @Test
+    void managerCannotCreateSellerLoginAccount() {
+        Actor manager = createActor(Role.MANAGER);
+        authenticate(manager, null);
+        int sequence = SEQUENCE.incrementAndGet();
+
+        assertThatThrownBy(() -> identityService.createSeller(new IdentityDtos.CreateSellerRequest(
+                null,
+                "NV-MANAGER-" + sequence,
+                "Người bán",
+                null,
+                new IdentityDtos.CreateSellerLoginRequest("manager-created-" + sequence, TEST_PASSWORD))))
+                .isInstanceOfSatisfying(BusinessException.class, exception -> {
+                    assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.FORBIDDEN);
+                    assertThat(exception.getStatus().value()).isEqualTo(403);
+                });
+    }
+
+    @Test
+    void updatesSellerAndRejectsDuplicateCodeWithinStore() {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+        int sequence = SEQUENCE.incrementAndGet();
+        String firstCode = "NV-" + sequence;
+        IdentityDtos.SellerResponse first = identityService.createSeller(
+                new IdentityDtos.CreateSellerRequest(null, firstCode, "Người bán một", null, null));
+        IdentityDtos.SellerResponse second = identityService.createSeller(
+                new IdentityDtos.CreateSellerRequest(null, firstCode + "-2", "Người bán hai", null, null));
+
+        IdentityDtos.SellerResponse updated = identityService.updateSeller(first.id(),
+                new IdentityDtos.UpdateSellerRequest(null, firstCode, "Người bán đã sửa", "0909000000"));
+        assertThat(updated.fullName()).isEqualTo("Người bán đã sửa");
+        assertThat(updated.phone()).isEqualTo("0909000000");
+
+        assertThatThrownBy(() -> identityService.updateSeller(second.id(),
+                new IdentityDtos.UpdateSellerRequest(null, "  " + firstCode.toLowerCase() + "  ", "Bị trùng", null)))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.DUPLICATE_RESOURCE));
+
+        IdentityDtos.SellerResponse inactive = identityService.changeSellerStatus(first.id(),
+                new IdentityDtos.ChangeSellerStatusRequest(SellerStatus.INACTIVE));
+        assertThat(inactive.status()).isEqualTo(SellerStatus.INACTIVE);
+    }
+
+    @Test
+    void disabledAccountCannotLoginAndOwnerCannotDisableSelf() {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+        int sequence = SEQUENCE.incrementAndGet();
+        IdentityDtos.UserResponse sellerUser = identityService.createUser(new IdentityDtos.CreateUserRequest(
+                "disabled-" + sequence, TEST_PASSWORD, "Tài khoản tạm ngưng", Set.of(Role.SELLER)));
+
+        identityService.changeUserStatus(sellerUser.id(), new IdentityDtos.ChangeUserStatusRequest(UserStatus.DISABLED));
+        assertThatThrownBy(() -> authService.login("disabled-" + sequence, TEST_PASSWORD))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.UNAUTHORIZED));
+
+        assertThatThrownBy(() -> identityService.changeUserStatus(
+                owner.user().getId(), new IdentityDtos.ChangeUserStatusRequest(UserStatus.DISABLED)))
+                .isInstanceOfSatisfying(BusinessException.class,
+                        exception -> assertThat(exception.getErrorCode()).isEqualTo(ErrorCode.INVALID_REQUEST));
     }
 
     @Test
@@ -298,6 +421,48 @@ class TamLotteryBackendApplicationIT {
         } finally {
             executor.shutdownNow();
         }
+    }
+
+    @Test
+    void sellerInventoryListsContainOnlyOwnRecords() {
+        Actor owner = createActor(Role.OWNER);
+        SellerActor firstSeller = createSellerActor(owner);
+        SellerActor secondSeller = createSellerActor(owner);
+        authenticate(owner, null);
+        InventoryScenario inventory = createInventoryScenario(owner, BUSINESS_DATE.plusDays(3), 100);
+        InventoryDtos.AllocationResponse first = inventoryService.issueAllocation(
+                createAllocation(firstSeller.seller(), inventory, 20).id());
+        inventoryService.issueAllocation(createAllocation(secondSeller.seller(), inventory, 20).id());
+        Long allocationLineId = first.lines().getFirst().id();
+
+        authenticate(firstSeller.actor(), firstSeller.seller());
+        inventoryService.createReturn(new InventoryDtos.ReturnRequest(
+                TicketReturnType.SELLER_TO_STORE,
+                firstSeller.seller().getId(),
+                null,
+                inventory.businessDate(),
+                null,
+                List.of(new InventoryDtos.ReturnLineRequest(
+                        inventory.batchLineId(), allocationLineId, 2))));
+        inventoryService.createAdjustment(new InventoryDtos.AdjustmentRequest(
+                inventory.batchLineId(),
+                InventoryHolderType.SELLER,
+                firstSeller.seller().getId(),
+                allocationLineId,
+                InventoryAdjustmentType.LOST,
+                AdjustmentDirection.DECREASE,
+                1,
+                "Báo mất vé"));
+
+        assertThat(inventoryService.listAllocations(PageRequest.of(0, 10)).getContent())
+                .extracting(InventoryDtos.AllocationResponse::sellerId)
+                .containsExactly(firstSeller.seller().getId());
+        assertThat(inventoryService.listReturns(PageRequest.of(0, 10)).getContent())
+                .extracting(InventoryDtos.ReturnResponse::sellerId)
+                .containsExactly(firstSeller.seller().getId());
+        assertThat(inventoryService.listAdjustments(PageRequest.of(0, 10)).getContent())
+                .extracting(InventoryDtos.AdjustmentResponse::sellerId)
+                .containsExactly(firstSeller.seller().getId());
     }
 
     private InventoryDtos.AllocationResponse createAllocation(

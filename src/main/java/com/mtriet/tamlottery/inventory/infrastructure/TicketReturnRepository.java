@@ -17,6 +17,9 @@ public interface TicketReturnRepository extends JpaRepository<TicketReturn, Long
     @EntityGraph(attributePaths = {"seller", "agency"})
     Page<TicketReturn> findAllByStoreId(Long storeId, Pageable pageable);
 
+    @EntityGraph(attributePaths = {"seller", "agency"})
+    Page<TicketReturn> findAllByStoreIdAndSellerId(Long storeId, Long sellerId, Pageable pageable);
+
     @EntityGraph(attributePaths = {"seller", "agency", "lines", "lines.batchLine", "lines.allocationLine"})
     Optional<TicketReturn> findByIdAndStoreId(Long id, Long storeId);
 
@@ -24,4 +27,3 @@ public interface TicketReturnRepository extends JpaRepository<TicketReturn, Long
     @Query("select r from TicketReturn r where r.id = :id and r.store.id = :storeId")
     Optional<TicketReturn> findForUpdate(@Param("id") Long id, @Param("storeId") Long storeId);
 }
-

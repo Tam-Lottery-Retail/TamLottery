@@ -85,7 +85,7 @@ public class InventoryController {
     }
 
     @GetMapping("/allocations")
-    @PreAuthorize("hasAnyRole('OWNER','MANAGER')")
+    @PreAuthorize("hasAnyRole('OWNER','MANAGER','SELLER')")
     Page<InventoryDtos.AllocationResponse> listAllocations(Pageable pageable) {
         return inventoryService.listAllocations(pageable);
     }
@@ -116,7 +116,7 @@ public class InventoryController {
     }
 
     @GetMapping("/returns")
-    @PreAuthorize("hasAnyRole('OWNER','MANAGER')")
+    @PreAuthorize("hasAnyRole('OWNER','MANAGER','SELLER')")
     Page<InventoryDtos.ReturnResponse> listReturns(Pageable pageable) {
         return inventoryService.listReturns(pageable);
     }
@@ -145,7 +145,7 @@ public class InventoryController {
     }
 
     @GetMapping("/inventory-adjustments")
-    @PreAuthorize("hasAnyRole('OWNER','MANAGER')")
+    @PreAuthorize("hasAnyRole('OWNER','MANAGER','SELLER')")
     Page<InventoryDtos.AdjustmentResponse> listAdjustments(Pageable pageable) {
         return inventoryService.listAdjustments(pageable);
     }
