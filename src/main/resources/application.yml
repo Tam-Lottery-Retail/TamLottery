@@ -52,3 +52,12 @@ app:
     owner-username: ${BOOTSTRAP_OWNER_USERNAME:}
     owner-password: ${BOOTSTRAP_OWNER_PASSWORD:}
     owner-full-name: ${BOOTSTRAP_OWNER_FULL_NAME:}
+  demo:
+    enabled: false
+    exit-after-seed: false
+    store-code: ""
+    store-name: ""
+    owner-username: ""
+    owner-password: ""
+    seller-username: ""
+    seller-password: ""

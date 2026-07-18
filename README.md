@@ -1,98 +1,276 @@
 # TamLottery
 
-Ứng dụng quản lý lô vé, giao vé cho seller, trả vé, thất thoát, giao dịch tiền và đối soát cuối ngày. Repository gồm Spring Boot backend và React frontend.
+[![CI](https://github.com/mtriet004/TamLottery/actions/workflows/ci.yml/badge.svg)](https://github.com/mtriet004/TamLottery/actions/workflows/ci.yml)
 
-## Yêu cầu
+TamLottery là MVP quản lý vận hành dành cho cửa hàng vé số cấp 2. Hệ thống theo dõi vòng đời vé và tiền từ lúc nhận vé của đại lý cấp 1 đến khi đối soát seller và chốt toàn cửa hàng.
 
-- Java 25
-- Node.js 22.13 trở lên khi phát triển frontend local
-- Docker Desktop hoặc MySQL 8.4
-- `JAVA_HOME` trỏ tới JDK 25
+> Real-world project được xây dựng từ quy trình của một cửa hàng vé số gia đình.
 
-## Chạy local
+## Tính năng chính
 
-Tạo database `tam_lottery`, sau đó cấu hình biến môi trường `DB_URL`, `DB_USERNAME`, `DB_PASSWORD` và `JWT_SECRET`.
+- Phân quyền `OWNER`, `MANAGER`, `SELLER` bằng JWT và refresh-token rotation.
+- Quản lý store, user, seller và đại lý cấp 1.
+- Nhận lô vé bằng form hoặc import CSV/XLSX có bước preview.
+- Giao vé, trả vé và ghi nhận thất thoát.
+- Ghi nhận, xác nhận và hủy giao dịch tiền.
+- Đối soát seller trước, sau đó đối soát toàn cửa hàng.
+- DailySales snapshot không cho chỉnh sửa trực tiếp sau khi chốt.
+- Store isolation và seller isolation tại backend.
+- Transaction, pessimistic locking, `@Version` và unique constraints chống oversell/trùng dữ liệu.
+- Docker, Aiven MySQL, Flyway, JUnit và MySQL Testcontainers.
+
+## Kiến trúc
+
+```mermaid
+flowchart LR
+    Browser["Browser"] --> Frontend["React / Vinext frontend"]
+    Frontend -->|"REST + JWT"| API["Spring Boot 4 API"]
+
+    subgraph Backend["Modular monolith"]
+        Identity["Identity & Security"]
+        MasterData["Store / Agency / Draw"]
+        Inventory["Batch / Allocation / Return / Loss"]
+        Cash["Cash Transaction"]
+        Reconciliation["Daily Sales & Reconciliation"]
+    end
+
+    API --> Identity
+    API --> MasterData
+    API --> Inventory
+    API --> Cash
+    API --> Reconciliation
+
+    Identity --> Database[("Aiven MySQL 8.4")]
+    MasterData --> Database
+    Inventory --> Database
+    Cash --> Database
+    Reconciliation --> Database
+    Flyway["Flyway migrations"] --> Database
+```
+
+Backend được triển khai dưới dạng modular monolith vì hệ thống hiện phục vụ cửa hàng nhỏ, cần transaction chặt chẽ nhưng chưa có nhu cầu vận hành microservice hoặc message broker.
+
+## ERD rút gọn
+
+```mermaid
+erDiagram
+    STORE ||--o{ APP_USER : owns
+    STORE ||--o{ SELLER : owns
+    STORE ||--o{ AGENCY : owns
+    APP_USER o|--o| SELLER : linked_to
+
+    STORE ||--o{ LOTTERY_DRAW : records
+    STORE ||--o{ LOTTERY_BATCH : receives
+    AGENCY ||--o{ LOTTERY_BATCH : supplies
+    LOTTERY_BATCH ||--|{ LOTTERY_BATCH_LINE : contains
+    LOTTERY_DRAW ||--o{ LOTTERY_BATCH_LINE : references
+
+    STORE ||--o{ TICKET_ALLOCATION : owns
+    SELLER ||--o{ TICKET_ALLOCATION : receives
+    TICKET_ALLOCATION ||--|{ TICKET_ALLOCATION_LINE : contains
+    LOTTERY_BATCH_LINE ||--o{ TICKET_ALLOCATION_LINE : allocates
+
+    STORE ||--o{ TICKET_RETURN : owns
+    SELLER o|--o{ TICKET_RETURN : returns
+    AGENCY o|--o{ TICKET_RETURN : receives
+    TICKET_RETURN ||--|{ TICKET_RETURN_LINE : contains
+    LOTTERY_BATCH_LINE ||--o{ TICKET_RETURN_LINE : references
+
+    STORE ||--o{ INVENTORY_ADJUSTMENT : owns
+    SELLER o|--o{ INVENTORY_ADJUSTMENT : reports
+    LOTTERY_BATCH_LINE ||--o{ INVENTORY_ADJUSTMENT : adjusts
+
+    STORE ||--o{ CASH_TRANSACTION : owns
+    SELLER o|--o{ CASH_TRANSACTION : submits
+    DAILY_RECONCILIATION o|--o{ CASH_TRANSACTION : groups
+
+    STORE ||--o{ DAILY_SALES : snapshots
+    STORE ||--o{ DAILY_RECONCILIATION : closes
+    SELLER o|--o{ DAILY_SALES : scoped_to
+    SELLER o|--o{ DAILY_RECONCILIATION : scoped_to
+    DAILY_SALES ||--|| DAILY_RECONCILIATION : reconciled_by
+```
+
+ERD đầy đủ được quản lý bằng Flyway tại `src/main/resources/db/migration`.
+
+## Luồng nghiệp vụ
+
+```mermaid
+flowchart TD
+    A["Nhận vé từ đại lý cấp 1"] --> B["Xác nhận lô vé"]
+    B --> C["Giao vé cho seller"]
+    C --> D["Seller bán vé"]
+    D --> E["Seller trả vé chưa bán"]
+    D --> F["Báo thất thoát / hư hỏng"]
+    E --> G["Seller giao tiền"]
+    F --> G
+    G --> H["Manager ghi sổ giao dịch"]
+    H --> I["Đối soát từng seller"]
+    I --> J["Đối soát toàn cửa hàng"]
+    J --> K["Tạo DailySales snapshot"]
+```
+
+Quy tắc chính:
+
+```text
+Seller sold = allocated - seller returns - approved seller losses
+Store sold  = received - agency returns - all approved losses
+Expected revenue = Σ(sold quantity × unit sale price at batch line)
+Difference = actual received - expected revenue
+```
+
+`SELLER_TO_STORE` chỉ chuyển tồn từ seller về cửa hàng. Chỉ `STORE_TO_AGENCY` mới làm giảm tổng vé của cửa hàng.
+
+## Screenshot
+
+### Dashboard owner
+
+![Dashboard owner](docs/screenshots/owner-overview.png)
+
+### Đối soát seller
+
+![Đối soát seller](docs/screenshots/seller-reconciliation.png)
+
+### Tạo người bán và tài khoản
+
+![Tạo người bán](docs/screenshots/create-seller-account.png)
+
+Kịch bản quay video demo 2–3 phút nằm tại [docs/demo-script.md](docs/demo-script.md).
+
+## Tài khoản và dữ liệu demo
+
+Profile `demo` tạo một store cách ly cùng dữ liệu mẫu. Profile này không được bật khi chạy bình thường.
+
+| Vai trò | Username | Password |
+|---|---|---|
+| Owner | `demo.owner.v01` | `Demo@12345` |
+| Seller | `demo.seller.v01` | `Demo@12345` |
+
+Dữ liệu mẫu gồm:
+
+- Một đại lý cấp 1.
+- Một lô 150 vé TP.HCM.
+- Giao 80 vé cho seller.
+- Seller trả 10 vé, thất thoát 2 vé và bán ước tính 68 vé.
+- Một giao dịch seller giao đủ `680.000đ`, đã được ghi sổ.
+- 80 vé tồn tại cửa hàng được trả về đại lý.
+
+Tạo dữ liệu demo một lần trên database đang cấu hình trong `.env`:
+
+```powershell
+docker compose run --rm `
+  -e SPRING_PROFILES_ACTIVE=aiven,demo `
+  app
+```
+
+Seeder có tính idempotent theo username owner demo. Chạy lại sẽ không tạo dữ liệu trùng.
+
+## Yêu cầu môi trường
+
+- Java 25.
+- Node.js 22.13 trở lên.
+- Docker Desktop.
+- MySQL 8.4 hoặc Aiven MySQL.
+- `JAVA_HOME` trỏ tới JDK 25.
+
+## Chạy bằng Docker và Aiven
+
+Tạo `.env` từ file mẫu và điền credential Aiven/JWT:
+
+```powershell
+Copy-Item .env.example .env
+docker compose up -d --build
+```
+
+Compose chỉ chạy backend và frontend; không tạo MySQL local. Không commit `.env`.
+
+| Thành phần | URL mặc định |
+|---|---|
+| Frontend | `http://localhost:3000` |
+| Backend | `http://localhost:8080` hoặc `APP_PORT` trong `.env` |
+| Healthcheck | `GET /actuator/health` |
+
+## Chạy backend local
 
 ```powershell
 $env:JAVA_HOME='C:\Program Files\Java\jdk-25.0.3'
 $env:SPRING_PROFILES_ACTIVE='local'
+$env:DB_URL='jdbc:mysql://localhost:3306/tam_lottery'
+$env:DB_USERNAME='tam_lottery'
+$env:DB_PASSWORD='tam_lottery'
 $env:JWT_SECRET='BASE64_ENCODED_SECRET_AT_LEAST_32_BYTES'
 .\mvnw.cmd spring-boot:run
 ```
 
-Muốn tạo store và owner lần đầu, cấu hình các biến `BOOTSTRAP_*` trong `.env.example` và đặt `BOOTSTRAP_ENABLED=true`.
-
-## Chạy với Aiven MySQL
-
-Tạo `.env` với `DB_URL`, `DB_USERNAME`, `DB_PASSWORD`. Nên dùng JDBC URL không chứa credential;
-username/password luôn để ở hai biến riêng. Ứng dụng vẫn chấp nhận service URI `mysql://...` của Aiven,
-nhưng sẽ loại credential khỏi URL trước khi khởi tạo datasource:
-
-```powershell
-.\scripts\run-aiven.ps1
-```
-
-Profile `aiven` mặc định giới hạn HikariCP ở 5 connection để phù hợp instance nhỏ. Production nên truyền thêm
-`JWT_SECRET` và các biến `BOOTSTRAP_*` qua secret manager của nền tảng chạy ứng dụng.
-
 ## Chạy frontend local
-
-Backend cần chạy ở port `8080`.
 
 ```powershell
 Set-Location frontend
-npm install
+npm ci
 npm run dev
 ```
 
-Frontend mặc định mở tại `http://localhost:3000` và proxy `/api` về backend.
+Frontend mở tại `http://localhost:3000` và proxy `/api` về backend.
 
-## Nhận lô vé và import file
+## Postman
 
-Cửa hàng cấp 2 không tạo kỳ quay độc lập. Khi tạo lô nhận, mỗi dòng vé gửi kèm đơn vị phát hành,
-mã tỉnh/đài, khu vực, ngày quay và hạn trả. Backend tự tìm hoặc tạo bản ghi kỳ vé tham chiếu theo
-`store + provinceCode + drawDate`; unique constraint trong MySQL ngăn ghi trùng.
+Import hai file:
 
-Trong giao diện **Nhận lô vé**, có thể nhập tay hoặc tải CSV/XLSX. File được đọc tạm để tạo preview,
-không được lưu trên server và chưa làm thay đổi database cho đến khi người dùng kiểm tra rồi bấm lưu.
-Giới hạn hiện tại là 5 MB, 500 dòng; có file mẫu tại
-`frontend/public/templates/lo-ve-mau.csv`. Ảnh/PDF và OCR chưa thuộc MVP này.
+- [TamLottery.postman_collection.json](docs/postman/TamLottery.postman_collection.json)
+- [TamLottery.local.postman_environment.json](docs/postman/TamLottery.local.postman_environment.json)
 
-## Chạy Docker
+Request login tự lưu `accessToken` và `refreshToken`. Collection chứa luồng MVP từ tạo người bán/đại lý đến đối soát.
 
-```powershell
-Copy-Item .env.example .env
-docker compose up --build
-```
-
-Compose chạy backend và frontend; backend kết nối Aiven MySQL, không tạo MySQL local. Không commit `.env`.
-`JWT_SECRET` là bắt buộc. Giao diện mặc định tại `http://localhost:3000`; backend health tại
-`GET http://localhost:${APP_PORT:-8080}/actuator/health` (trên PowerShell, thay phần biến bằng port trong `.env`).
+Collection đã được chạy end-to-end với 24 request và 10 assertion. Vì bước cuối chốt ngày, hãy chạy một lần cho mỗi `businessDate` hoặc dùng một store/database demo mới khi muốn chạy lại.
 
 ## Kiểm thử
 
-Unit test không cần Docker:
+Unit test:
 
 ```powershell
 .\mvnw.cmd test
 ```
 
-Integration test chạy Flyway và Hibernate schema validation trên MySQL 8.4 Testcontainers:
+Integration test trên MySQL 8.4 Testcontainers:
 
 ```powershell
-.\mvnw.cmd verify -Pintegration-tests
+.\mvnw.cmd clean verify -Pintegration-tests
 ```
 
-Integration test tự bỏ qua khi Docker daemon không khả dụng.
+Frontend:
 
-## Luồng API chính
+```powershell
+Set-Location frontend
+npm ci
+npm run lint
+npm run build
+```
 
-1. `POST /api/v1/auth/login`
-2. Tạo seller và agency.
-3. Tạo batch bằng nhập tay hoặc import preview; kỳ vé được tự ghi nhận, sau đó gọi `POST /api/v1/batches/{id}/confirm`.
-4. Tạo allocation rồi `POST /api/v1/allocations/{id}/issue`.
-5. Tạo return/adjustment và xác nhận hoặc duyệt.
-6. Seller tạo cash transaction; manager post.
-7. Xem `/api/v1/reconciliations/preview`, chốt seller trước, sau đó chốt store.
+Trạng thái release `v0.1.0`:
 
-Tiền dùng đơn vị đồng (`BIGINT`), timestamp lưu UTC và ngày nghiệp vụ dùng `LocalDate`.
+```text
+12 unit tests
+12 integration tests
+Frontend lint/build
+Docker backend/frontend healthcheck
+```
+
+GitHub Actions chạy backend integration tests và frontend lint/build trên mỗi push/PR.
+
+## Tài liệu bổ sung
+
+- [Ghi chú thiết kế và chuẩn bị phỏng vấn](docs/tamlottery-interview-notes.md)
+- [Kịch bản demo 2–3 phút](docs/demo-script.md)
+- [Postman collection](docs/postman/TamLottery.postman_collection.json)
+
+## Roadmap sau MVP
+
+- Lottery result và quy trình trả thưởng.
+- Audit log đầy đủ.
+- Export Excel/PDF.
+- Monitoring, backup và cảnh báo.
+- CI/CD deployment.
+
+## Release
+
+Phiên bản MVP đầu tiên: `v0.1.0`.
