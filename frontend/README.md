@@ -20,6 +20,16 @@ $env:BACKEND_URL='http://localhost:8080'
 npm run dev
 ```
 
+## Nhập lô vé
+
+Mở **Nhận vé → Nhận lô vé** rồi chọn một trong hai cách:
+
+1. **Nhập thủ công**: điền thông tin đài/ngày quay ngay trên từng dòng vé.
+2. **Tải file CSV/XLSX**: tải [file mẫu](public/templates/lo-ve-mau.csv), đưa file lên để trích xuất,
+   kiểm tra preview rồi mới lưu.
+
+Upload chỉ phục vụ parse tạm thời, file gốc không được lưu. MVP chưa hỗ trợ OCR ảnh/PDF.
+
 ## Kiểm tra
 
 ```powershell

@@ -8,6 +8,7 @@ import com.mtriet.tamlottery.inventory.domain.LotteryBatchStatus;
 import com.mtriet.tamlottery.inventory.domain.TicketAllocationStatus;
 import com.mtriet.tamlottery.inventory.domain.TicketReturnStatus;
 import com.mtriet.tamlottery.inventory.domain.TicketReturnType;
+import com.mtriet.tamlottery.masterdata.domain.LotteryRegion;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotEmpty;
@@ -25,7 +26,11 @@ public final class InventoryDtos {
     }
 
     public record BatchLineRequest(
-            @NotNull Long drawId,
+            @NotBlank @Size(max = 160) String issuerName,
+            @NotBlank @Size(max = 30) String provinceCode,
+            @NotNull LotteryRegion region,
+            @NotNull LocalDate drawDate,
+            @NotNull Instant returnCutoffAt,
             @Positive int quantityReceived,
             @PositiveOrZero long unitCost,
             @Positive long unitSalePrice,
@@ -45,8 +50,11 @@ public final class InventoryDtos {
     public record BatchLineResponse(
             Long id,
             Long drawId,
+            String issuerName,
             String provinceCode,
+            LotteryRegion region,
             LocalDate drawDate,
+            Instant returnCutoffAt,
             int quantityReceived,
             long unitCost,
             long unitSalePrice,
@@ -65,6 +73,17 @@ public final class InventoryDtos {
             String note,
             Instant confirmedAt,
             List<BatchLineResponse> lines) {
+    }
+
+    public record BatchImportPreviewResponse(
+            String fileName,
+            String agencyCode,
+            String receiptCode,
+            LocalDate businessDate,
+            Instant receivedAt,
+            String note,
+            List<BatchLineRequest> lines,
+            List<String> warnings) {
     }
 
     public record AllocationLineRequest(@NotNull Long batchLineId, @Positive int quantity) {

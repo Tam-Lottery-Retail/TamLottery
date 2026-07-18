@@ -101,7 +101,7 @@ public class InventoryService {
         Agency agency = requireAgency(request.agencyId(), storeId);
         LotteryBatch batch = new LotteryBatch(
                 store, agency, request.receiptCode(), request.businessDate(), request.receivedAt(), request.note());
-        buildBatchLines(request.lines(), storeId).forEach(batch::addLine);
+        buildBatchLines(request.lines(), store).forEach(batch::addLine);
         return toBatchResponse(batchRepository.save(batch));
     }
 
@@ -120,7 +120,7 @@ public class InventoryService {
                 request.businessDate(),
                 request.receivedAt(),
                 request.note(),
-                buildBatchLines(request.lines(), storeId));
+                buildBatchLines(request.lines(), batch.getStore()));
         return toBatchResponse(batch);
     }
 
@@ -407,11 +407,18 @@ public class InventoryService {
                 .map(this::toAdjustmentResponse);
     }
 
-    private List<LotteryBatchLine> buildBatchLines(List<InventoryDtos.BatchLineRequest> requests, Long storeId) {
+    private List<LotteryBatchLine> buildBatchLines(List<InventoryDtos.BatchLineRequest> requests, Store store) {
         List<LotteryBatchLine> lines = new ArrayList<>();
         for (InventoryDtos.BatchLineRequest request : requests) {
-            LotteryDraw draw = drawRepository.findByIdAndStoreId(request.drawId(), storeId)
-                    .orElseThrow(() -> BusinessException.notFound("Lottery draw not found"));
+            LotteryDraw draw = drawRepository.findByStoreIdAndProvinceCodeIgnoreCaseAndDrawDate(
+                            store.getId(), request.provinceCode(), request.drawDate())
+                    .orElseGet(() -> drawRepository.save(new LotteryDraw(
+                            store,
+                            request.issuerName(),
+                            request.provinceCode(),
+                            request.region(),
+                            request.drawDate(),
+                            request.returnCutoffAt())));
             if (draw.getStatus() != LotteryDrawStatus.OPEN) {
                 throw BusinessException.invalid(ErrorCode.INVALID_STATE, "Lottery draw is not open");
             }
@@ -516,8 +523,11 @@ public class InventoryService {
                 .map(line -> new InventoryDtos.BatchLineResponse(
                         line.getId(),
                         line.getDraw().getId(),
+                        line.getDraw().getIssuerName(),
                         line.getDraw().getProvinceCode(),
+                        line.getDraw().getRegion(),
                         line.getDraw().getDrawDate(),
+                        line.getDraw().getReturnCutoffAt(),
                         line.getQuantityReceived(),
                         line.getUnitCost(),
                         line.getUnitSalePrice(),

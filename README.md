@@ -47,6 +47,17 @@ npm run dev
 
 Frontend mặc định mở tại `http://localhost:3000` và proxy `/api` về backend.
 
+## Nhận lô vé và import file
+
+Cửa hàng cấp 2 không tạo kỳ quay độc lập. Khi tạo lô nhận, mỗi dòng vé gửi kèm đơn vị phát hành,
+mã tỉnh/đài, khu vực, ngày quay và hạn trả. Backend tự tìm hoặc tạo bản ghi kỳ vé tham chiếu theo
+`store + provinceCode + drawDate`; unique constraint trong MySQL ngăn ghi trùng.
+
+Trong giao diện **Nhận lô vé**, có thể nhập tay hoặc tải CSV/XLSX. File được đọc tạm để tạo preview,
+không được lưu trên server và chưa làm thay đổi database cho đến khi người dùng kiểm tra rồi bấm lưu.
+Giới hạn hiện tại là 5 MB, 500 dòng; có file mẫu tại
+`frontend/public/templates/lo-ve-mau.csv`. Ảnh/PDF và OCR chưa thuộc MVP này.
+
 ## Chạy Docker
 
 ```powershell
@@ -55,7 +66,8 @@ docker compose up --build
 ```
 
 Compose chạy backend và frontend; backend kết nối Aiven MySQL, không tạo MySQL local. Không commit `.env`.
-`JWT_SECRET` là bắt buộc. Giao diện mặc định tại `http://localhost:3000`; backend health tại `GET http://localhost:8080/actuator/health`.
+`JWT_SECRET` là bắt buộc. Giao diện mặc định tại `http://localhost:3000`; backend health tại
+`GET http://localhost:${APP_PORT:-8080}/actuator/health` (trên PowerShell, thay phần biến bằng port trong `.env`).
 
 ## Kiểm thử
 
@@ -76,8 +88,8 @@ Integration test tự bỏ qua khi Docker daemon không khả dụng.
 ## Luồng API chính
 
 1. `POST /api/v1/auth/login`
-2. Tạo seller, agency và draw.
-3. Tạo batch rồi `POST /api/v1/batches/{id}/confirm`.
+2. Tạo seller và agency.
+3. Tạo batch bằng nhập tay hoặc import preview; kỳ vé được tự ghi nhận, sau đó gọi `POST /api/v1/batches/{id}/confirm`.
 4. Tạo allocation rồi `POST /api/v1/allocations/{id}/issue`.
 5. Tạo return/adjustment và xác nhận hoặc duyệt.
 6. Seller tạo cash transaction; manager post.

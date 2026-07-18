@@ -1,10 +1,12 @@
 package com.mtriet.tamlottery.inventory.api;
 
 import com.mtriet.tamlottery.inventory.application.InventoryService;
+import com.mtriet.tamlottery.inventory.application.BatchImportService;
 import jakarta.validation.Valid;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -14,15 +16,20 @@ import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.RequestPart;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.multipart.MultipartFile;
 
 @RestController
 @RequestMapping("/api/v1")
 public class InventoryController {
 
     private final InventoryService inventoryService;
+    private final BatchImportService batchImportService;
 
-    public InventoryController(InventoryService inventoryService) {
+    public InventoryController(InventoryService inventoryService, BatchImportService batchImportService) {
         this.inventoryService = inventoryService;
+        this.batchImportService = batchImportService;
     }
 
     @GetMapping("/batches")
@@ -42,6 +49,19 @@ public class InventoryController {
     @ResponseStatus(HttpStatus.CREATED)
     InventoryDtos.BatchResponse createBatch(@Valid @RequestBody InventoryDtos.BatchRequest request) {
         return inventoryService.createBatch(request);
+    }
+
+    @PostMapping(value = "/batches/import/preview", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @PreAuthorize("hasAnyRole('OWNER','MANAGER')")
+    InventoryDtos.BatchImportPreviewResponse previewBatchImport(@RequestPart("file") MultipartFile file) {
+        return batchImportService.preview(file);
+    }
+
+    @PostMapping(value = "/batches/import/preview", consumes = MediaType.APPLICATION_OCTET_STREAM_VALUE)
+    @PreAuthorize("hasAnyRole('OWNER','MANAGER')")
+    InventoryDtos.BatchImportPreviewResponse previewBatchImport(
+            @RequestParam String fileName, @RequestBody byte[] content) {
+        return batchImportService.preview(fileName, content);
     }
 
     @PutMapping("/batches/{id}")

@@ -3,7 +3,6 @@ package com.mtriet.tamlottery.masterdata.api;
 import com.mtriet.tamlottery.masterdata.domain.LotteryDrawStatus;
 import com.mtriet.tamlottery.masterdata.domain.LotteryRegion;
 import jakarta.validation.constraints.NotBlank;
-import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 
 import java.time.Instant;
@@ -26,14 +25,6 @@ public final class MasterDataDtos {
     public record ChangeAgencyStatusRequest(boolean active) {
     }
 
-    public record CreateLotteryDrawRequest(
-            @NotBlank @Size(max = 160) String issuerName,
-            @NotBlank @Size(max = 30) String provinceCode,
-            @NotNull LotteryRegion region,
-            @NotNull LocalDate drawDate,
-            @NotNull Instant returnCutoffAt) {
-    }
-
     public record LotteryDrawResponse(
             Long id,
             String issuerName,
@@ -44,7 +35,4 @@ public final class MasterDataDtos {
             LotteryDrawStatus status) {
     }
 
-    public record ChangeLotteryDrawStatusRequest(@NotNull LotteryDrawStatus status) {
-    }
 }
-

@@ -14,7 +14,6 @@ type Section =
   | "team";
 type ModalKind =
   | "agency"
-  | "draw"
   | "user"
   | "seller"
   | "batch"
@@ -30,7 +29,9 @@ type Agency = { id: number; code: string; name: string; contactName?: string; ph
 type Draw = { id: number; issuerName: string; provinceCode: string; region: string; drawDate: string; returnCutoffAt: string; status: string };
 type User = { id: number; username: string; fullName: string; status: string; roles: Role[] };
 type Seller = { id: number; userId?: number; code: string; fullName: string; phone?: string; status: string };
-type BatchLine = { id: number; drawId: number; provinceCode: string; drawDate: string; quantityReceived: number; unitCost: number; unitSalePrice: number; serialFrom?: string; serialTo?: string };
+type BatchLine = { id: number; drawId: number; issuerName: string; provinceCode: string; region: string; drawDate: string; returnCutoffAt: string; quantityReceived: number; unitCost: number; unitSalePrice: number; serialFrom?: string; serialTo?: string };
+type BatchLineDraft = { key: number; issuerName: string; provinceCode: string; region: string; drawDate: string; returnCutoffAt: string; quantityReceived: string; unitCost: string; unitSalePrice: string; serialFrom: string; serialTo: string };
+type BatchImportPreview = { fileName: string; agencyCode?: string; receiptCode?: string; businessDate?: string; receivedAt?: string; note?: string; lines: Array<Omit<BatchLineDraft, "key" | "quantityReceived" | "unitCost" | "unitSalePrice"> & { quantityReceived: number; unitCost: number; unitSalePrice: number }>; warnings: string[] };
 type Batch = { id: number; agencyId: number; agencyName: string; receiptCode: string; businessDate: string; receivedAt: string; status: string; note?: string; lines: BatchLine[] };
 type AllocationLine = { id: number; batchLineId: number; provinceCode: string; drawDate: string; quantity: number };
 type Allocation = { id: number; sellerId: number; sellerName: string; businessDate: string; issuedAt?: string; status: string; note?: string; lines: AllocationLine[] };
@@ -67,6 +68,15 @@ const nowLocal = () => {
   const value = new Date(Date.now() - new Date().getTimezoneOffset() * 60_000);
   return value.toISOString().slice(0, 16);
 };
+const toLocalDateTime = (value?: string) => {
+  if (!value) return nowLocal();
+  const date = new Date(value);
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
+};
+const emptyBatchLine = (key = Date.now()): BatchLineDraft => ({
+  key, issuerName: "", provinceCode: "", region: "SOUTH", drawDate: today(), returnCutoffAt: nowLocal(),
+  quantityReceived: "100", unitCost: "9000", unitSalePrice: "10000", serialFrom: "", serialTo: "",
+});
 const money = new Intl.NumberFormat("vi-VN", { style: "currency", currency: "VND", maximumFractionDigits: 0 });
 const number = new Intl.NumberFormat("vi-VN");
 const formatMoney = (value?: number) => money.format(value ?? 0);
@@ -99,7 +109,7 @@ function clearTokens() {
 
 async function api<T>(path: string, init: RequestInit = {}, canRefresh = true): Promise<T> {
   const headers = new Headers(init.headers);
-  if (!headers.has("Content-Type") && init.body) headers.set("Content-Type", "application/json");
+  if (!headers.has("Content-Type") && init.body && !(init.body instanceof FormData)) headers.set("Content-Type", "application/json");
   const accessToken = sessionStorage.getItem("tamlottery.access");
   if (accessToken) headers.set("Authorization", `Bearer ${accessToken}`);
 
@@ -146,7 +156,7 @@ const NAV_ITEMS: Array<{ id: Section; icon: string; label: string; managerOnly?:
   { id: "returns", icon: "04", label: "Trả & thất thoát" },
   { id: "cash", icon: "05", label: "Giao dịch tiền" },
   { id: "reconciliation", icon: "06", label: "Đối soát" },
-  { id: "catalog", icon: "07", label: "Đại lý & kỳ quay", managerOnly: true },
+  { id: "catalog", icon: "07", label: "Đại lý & kỳ vé", managerOnly: true },
   { id: "team", icon: "08", label: "Nhân sự", managerOnly: true },
 ];
 
@@ -274,7 +284,7 @@ export default function Home() {
           {active === "returns" && <ReturnsView returns={snapshot.returns} adjustments={snapshot.adjustments} isManager={isManager} onOpen={setModal} onAction={perform} />}
           {active === "cash" && <CashView items={snapshot.cash} isManager={isManager} onAction={perform} />}
           {active === "reconciliation" && <ReconciliationView items={snapshot.reconciliations} sellers={snapshot.sellers} isOwner={isOwner} onAction={perform} notify={notify} reload={load} />}
-          {active === "catalog" && <CatalogView agencies={snapshot.agencies} draws={snapshot.draws} onOpen={setModal} />}
+          {active === "catalog" && <CatalogView agencies={snapshot.agencies} draws={snapshot.draws} />}
           {active === "team" && <TeamView users={snapshot.users} sellers={snapshot.sellers} isOwner={isOwner} onOpen={setModal} />}
         </section>
       </main>
@@ -322,7 +332,7 @@ function QuickCreate({ active, isManager, onOpen }: { active: Section; isManager
   const map: Partial<Record<Section, { kind: ModalKind; label: string }>> = {
     batches: { kind: "batch", label: "Nhận lô vé" }, allocations: { kind: "allocation", label: "Giao vé" },
     returns: { kind: "return", label: "Tạo phiếu trả" }, cash: { kind: "cash", label: "Thêm giao dịch" },
-    catalog: { kind: "draw", label: "Tạo kỳ quay" }, team: { kind: "seller", label: "Thêm seller" },
+    catalog: { kind: "agency", label: "Thêm đại lý" }, team: { kind: "seller", label: "Thêm seller" },
   };
   const action = map[active] ?? (isManager ? { kind: "batch" as ModalKind, label: "Nhập liệu mới" } : { kind: "cash" as ModalKind, label: "Giao tiền" });
   return <button className="primary-button" onClick={() => onOpen(action.kind)}>＋ {action.label}</button>;
@@ -417,9 +427,9 @@ function ReconciliationView({ items, sellers, isOwner, onAction, notify, reload 
     </DataTable></div></div>;
 }
 
-function CatalogView({ agencies, draws, onOpen }: { agencies: Agency[]; draws: Draw[]; onOpen: (kind: ModalKind) => void }) {
-  return <div className="stack-lg"><div className="section-actions"><button className="secondary-button" onClick={() => onOpen("agency")}>＋ Thêm đại lý</button><button className="primary-button" onClick={() => onOpen("draw")}>＋ Tạo kỳ quay</button></div><section className="two-column equal"><div className="panel"><PanelHeader title="Đại lý cấp 1" subtitle="Nguồn nhận và nơi trả vé" count={agencies.length} /><div className="card-list">{agencies.length ? agencies.map((agency) => <article className="entity-card" key={agency.id}><div className="entity-avatar">{agency.code.slice(0, 2)}</div><div><strong>{agency.name}</strong><small>{agency.contactName || "Chưa có người liên hệ"} · {agency.phone || "Chưa có SĐT"}</small></div><Status value={agency.active ? "ACTIVE" : "INACTIVE"} /></article>) : <Empty text="Chưa có đại lý" />}</div></div>
-    <div className="panel"><PanelHeader title="Kỳ quay" subtitle="Kỳ quay đang dùng để nhận lô vé" count={draws.length} /><div className="card-list">{draws.length ? draws.map((draw) => <article className="entity-card" key={draw.id}><div className="date-tile"><strong>{draw.drawDate.slice(8, 10)}</strong><small>Th.{draw.drawDate.slice(5, 7)}</small></div><div><strong>{draw.issuerName}</strong><small>{draw.provinceCode} · {draw.region} · Hạn trả {formatDateTime(draw.returnCutoffAt)}</small></div><Status value={draw.status} /></article>) : <Empty text="Chưa có kỳ quay" />}</div></div></section></div>;
+function CatalogView({ agencies, draws }: { agencies: Agency[]; draws: Draw[] }) {
+  return <div className="stack-lg"><section className="two-column equal"><div className="panel"><PanelHeader title="Đại lý cấp 1" subtitle="Nguồn nhận và nơi trả vé" count={agencies.length} /><div className="card-list">{agencies.length ? agencies.map((agency) => <article className="entity-card" key={agency.id}><div className="entity-avatar">{agency.code.slice(0, 2)}</div><div><strong>{agency.name}</strong><small>{agency.contactName || "Chưa có người liên hệ"} · {agency.phone || "Chưa có SĐT"}</small></div><Status value={agency.active ? "ACTIVE" : "INACTIVE"} /></article>) : <Empty text="Chưa có đại lý" />}</div></div>
+    <div className="panel"><PanelHeader title="Kỳ vé đã ghi nhận" subtitle="Hệ thống tự tạo khi cửa hàng nhận lô vé từ đại lý" count={draws.length} /><div className="card-list">{draws.length ? draws.map((draw) => <article className="entity-card" key={draw.id}><div className="date-tile"><strong>{draw.drawDate.slice(8, 10)}</strong><small>Th.{draw.drawDate.slice(5, 7)}</small></div><div><strong>{draw.issuerName}</strong><small>{draw.provinceCode} · {draw.region} · Hạn trả {formatDateTime(draw.returnCutoffAt)}</small></div><Status value={draw.status} /></article>) : <Empty text="Kỳ vé sẽ xuất hiện sau khi nhận lô đầu tiên" />}</div></div></section></div>;
 }
 
 function TeamView({ users, sellers, isOwner, onOpen }: { users: User[]; sellers: Seller[]; isOwner: boolean; onOpen: (kind: ModalKind) => void }) {
@@ -431,10 +441,52 @@ function EntityModal({ kind, snapshot, onClose, onCreated }: { kind: ModalKind; 
   const [saving, setSaving] = useState(false); const [error, setError] = useState("");
   const [returnType, setReturnType] = useState("SELLER_TO_STORE");
   const [holderType, setHolderType] = useState("STORE");
-  const [batchLines, setBatchLines] = useState([{ key: 1, drawId: "", quantityReceived: "100", unitCost: "9000", unitSalePrice: "10000", serialFrom: "", serialTo: "" }]);
-  const title: Record<ModalKind, string> = { agency: "Thêm đại lý", draw: "Tạo kỳ quay", user: "Tạo tài khoản", seller: "Thêm seller", batch: "Nhận lô vé", allocation: "Giao vé cho seller", return: "Tạo phiếu trả", adjustment: "Báo điều chỉnh tồn", cash: "Thêm giao dịch tiền" };
+  const [batchLines, setBatchLines] = useState<BatchLineDraft[]>([emptyBatchLine(1)]);
+  const [batchMeta, setBatchMeta] = useState({ agencyId: "", receiptCode: "", businessDate: today(), receivedAt: nowLocal(), note: "" });
+  const [entryMode, setEntryMode] = useState<"manual" | "file">("manual");
+  const [importFile, setImportFile] = useState<File | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importWarnings, setImportWarnings] = useState<string[]>([]);
+  const title: Record<ModalKind, string> = { agency: "Thêm đại lý", user: "Tạo tài khoản", seller: "Thêm seller", batch: "Nhận lô vé", allocation: "Giao vé cho seller", return: "Tạo phiếu trả", adjustment: "Báo điều chỉnh tồn", cash: "Thêm giao dịch tiền" };
   const confirmedLines = snapshot.batches.filter((batch) => batch.status === "CONFIRMED").flatMap((batch) => batch.lines.map((line) => ({ ...line, receiptCode: batch.receiptCode })));
   const issuedLines = snapshot.allocations.filter((allocation) => allocation.status === "ISSUED").flatMap((allocation) => allocation.lines.map((line) => ({ ...line, sellerId: allocation.sellerId, sellerName: allocation.sellerName })));
+
+  const updateBatchLine = (key: number, field: Exclude<keyof BatchLineDraft, "key">, value: string) => {
+    setBatchLines((lines) => lines.map((line) => line.key === key ? { ...line, [field]: value } : line));
+  };
+
+  const previewImport = async () => {
+    if (!importFile) { setError("Vui lòng chọn file CSV hoặc XLSX"); return; }
+    setImporting(true); setError(""); setImportWarnings([]);
+    try {
+      const preview = await api<BatchImportPreview>(`/api/v1/batches/import/preview?fileName=${encodeURIComponent(importFile.name)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: await importFile.arrayBuffer(),
+      });
+      const agency = snapshot.agencies.find((item) => item.code.toLowerCase() === preview.agencyCode?.toLowerCase());
+      setBatchMeta({
+        agencyId: agency ? String(agency.id) : "",
+        receiptCode: preview.receiptCode ?? "",
+        businessDate: preview.businessDate ?? today(),
+        receivedAt: toLocalDateTime(preview.receivedAt),
+        note: preview.note ?? "",
+      });
+      setBatchLines(preview.lines.map((line, index) => ({
+        ...line,
+        key: Date.now() + index,
+        quantityReceived: String(line.quantityReceived),
+        unitCost: String(line.unitCost),
+        unitSalePrice: String(line.unitSalePrice),
+        returnCutoffAt: toLocalDateTime(line.returnCutoffAt),
+        serialFrom: line.serialFrom ?? "",
+        serialTo: line.serialTo ?? "",
+      })));
+      setImportWarnings(agency || !preview.agencyCode ? preview.warnings : [...preview.warnings, `Không tìm thấy đại lý mã ${preview.agencyCode}; hãy chọn thủ công.`]);
+      setEntryMode("manual");
+    } catch (reason) { setError(reason instanceof Error ? reason.message : "Không thể đọc file"); }
+    finally { setImporting(false); }
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault(); setSaving(true); setError(""); const form = new FormData(event.currentTarget);
@@ -442,10 +494,9 @@ function EntityModal({ kind, snapshot, onClose, onCreated }: { kind: ModalKind; 
     const value = (name: string) => String(form.get(name) ?? "").trim();
     try {
       if (kind === "agency") { path = "/api/v1/agencies"; payload = { code: value("code"), name: value("name"), contactName: value("contactName") || null, phone: value("phone") || null }; message = "Đã thêm đại lý"; }
-      if (kind === "draw") { path = "/api/v1/draws"; payload = { issuerName: value("issuerName"), provinceCode: value("provinceCode"), region: value("region"), drawDate: value("drawDate"), returnCutoffAt: new Date(value("returnCutoffAt")).toISOString() }; message = "Đã tạo kỳ quay"; }
       if (kind === "user") { path = "/api/v1/users"; payload = { username: value("username"), password: value("password"), fullName: value("fullName"), roles: form.getAll("roles") }; message = "Đã tạo tài khoản"; }
       if (kind === "seller") { path = "/api/v1/sellers"; payload = { userId: value("userId") ? Number(value("userId")) : null, code: value("code"), fullName: value("fullName"), phone: value("phone") || null }; message = "Đã thêm seller"; }
-      if (kind === "batch") { path = "/api/v1/batches"; payload = { agencyId: Number(value("agencyId")), receiptCode: value("receiptCode"), businessDate: value("businessDate"), receivedAt: new Date(value("receivedAt")).toISOString(), note: value("note") || null, lines: batchLines.map((line) => ({ drawId: Number(line.drawId), quantityReceived: Number(line.quantityReceived), unitCost: Number(line.unitCost), unitSalePrice: Number(line.unitSalePrice), serialFrom: line.serialFrom || null, serialTo: line.serialTo || null })) }; message = "Đã tạo lô vé bản nháp"; }
+      if (kind === "batch") { path = "/api/v1/batches"; payload = { agencyId: Number(value("agencyId")), receiptCode: value("receiptCode"), businessDate: value("businessDate"), receivedAt: new Date(value("receivedAt")).toISOString(), note: value("note") || null, lines: batchLines.map((line) => ({ issuerName: line.issuerName, provinceCode: line.provinceCode, region: line.region, drawDate: line.drawDate, returnCutoffAt: new Date(line.returnCutoffAt).toISOString(), quantityReceived: Number(line.quantityReceived), unitCost: Number(line.unitCost), unitSalePrice: Number(line.unitSalePrice), serialFrom: line.serialFrom || null, serialTo: line.serialTo || null })) }; message = "Đã tạo lô vé bản nháp và ghi nhận kỳ vé"; }
       if (kind === "allocation") { path = "/api/v1/allocations"; payload = { sellerId: Number(value("sellerId")), businessDate: value("businessDate"), note: value("note") || null, lines: [{ batchLineId: Number(value("batchLineId")), quantity: Number(value("quantity")) }] }; message = "Đã tạo phiếu giao vé"; }
       if (kind === "return") { path = "/api/v1/returns"; const allocationLine = issuedLines.find((line) => line.id === Number(value("allocationLineId"))); payload = { returnType, sellerId: returnType === "SELLER_TO_STORE" ? Number(value("sellerId")) : null, agencyId: returnType === "STORE_TO_AGENCY" ? Number(value("agencyId")) : null, businessDate: value("businessDate"), note: value("note") || null, lines: [{ batchLineId: returnType === "SELLER_TO_STORE" ? allocationLine?.batchLineId : Number(value("batchLineId")), allocationLineId: returnType === "SELLER_TO_STORE" ? Number(value("allocationLineId")) : null, quantity: Number(value("quantity")) }] }; message = "Đã tạo phiếu trả vé"; }
       if (kind === "adjustment") { path = "/api/v1/inventory-adjustments"; const allocationLine = issuedLines.find((line) => line.id === Number(value("allocationLineId"))); payload = { batchLineId: holderType === "SELLER" ? allocationLine?.batchLineId : Number(value("batchLineId")), holderType, sellerId: holderType === "SELLER" ? Number(value("sellerId")) : null, allocationLineId: holderType === "SELLER" ? Number(value("allocationLineId")) : null, adjustmentType: value("adjustmentType"), direction: value("direction"), quantity: Number(value("quantity")), reason: value("reason") }; message = "Đã gửi điều chỉnh chờ duyệt"; }
@@ -457,15 +508,23 @@ function EntityModal({ kind, snapshot, onClose, onCreated }: { kind: ModalKind; 
 
   return <div className="modal-backdrop" onMouseDown={(event) => { if (event.currentTarget === event.target) onClose(); }}><section className="modal-card" role="dialog" aria-modal="true" aria-label={title[kind]}><header><div><p className="eyebrow">Nhập liệu</p><h2>{title[kind]}</h2></div><button className="close-button" onClick={onClose} aria-label="Đóng">×</button></header><form onSubmit={submit} className="modal-form">
     {kind === "agency" && <><Field label="Mã đại lý"><input name="code" placeholder="DL01" required /></Field><Field label="Tên đại lý"><input name="name" placeholder="Đại lý Minh Tâm" required /></Field><div className="form-grid"><Field label="Người liên hệ"><input name="contactName" /></Field><Field label="Số điện thoại"><input name="phone" inputMode="tel" /></Field></div></>}
-    {kind === "draw" && <><Field label="Đơn vị phát hành"><input name="issuerName" placeholder="Xổ số kiến thiết TP.HCM" required /></Field><div className="form-grid"><Field label="Mã tỉnh/đài"><input name="provinceCode" placeholder="HCM" required /></Field><Field label="Khu vực"><select name="region" defaultValue="SOUTH"><option value="SOUTH">Miền Nam</option><option value="CENTRAL">Miền Trung</option><option value="NORTH">Miền Bắc</option></select></Field></div><div className="form-grid"><Field label="Ngày quay"><input type="date" name="drawDate" defaultValue={today()} required /></Field><Field label="Hạn trả vé"><input type="datetime-local" name="returnCutoffAt" defaultValue={nowLocal()} required /></Field></div></>}
     {kind === "user" && <><Field label="Họ và tên"><input name="fullName" required /></Field><div className="form-grid"><Field label="Tên đăng nhập"><input name="username" autoComplete="off" required /></Field><Field label="Mật khẩu"><input type="password" name="password" minLength={8} autoComplete="new-password" required /></Field></div><fieldset><legend>Vai trò</legend><div className="check-row"><label><input type="checkbox" name="roles" value="MANAGER" /> Quản lý</label><label><input type="checkbox" name="roles" value="SELLER" /> Seller</label><label><input type="checkbox" name="roles" value="OWNER" /> Owner</label></div></fieldset></>}
     {kind === "seller" && <><Field label="Họ và tên"><input name="fullName" required /></Field><div className="form-grid"><Field label="Mã seller"><input name="code" placeholder="NV01" required /></Field><Field label="Số điện thoại"><input name="phone" inputMode="tel" /></Field></div><Field label="Liên kết tài khoản (không bắt buộc)"><select name="userId"><option value="">Chưa liên kết</option>{snapshot.users.map((user) => <option key={user.id} value={user.id}>{user.fullName} (@{user.username})</option>)}</select></Field></>}
-    {kind === "batch" && <><div className="form-grid"><Field label="Đại lý"><select name="agencyId" required><option value="">Chọn đại lý</option>{snapshot.agencies.filter((a) => a.active).map((agency) => <option key={agency.id} value={agency.id}>{agency.name}</option>)}</select></Field><Field label="Mã phiếu nhận"><input name="receiptCode" placeholder="PN-2026-001" required /></Field></div><div className="form-grid"><Field label="Ngày bán"><input type="date" name="businessDate" defaultValue={today()} required /></Field><Field label="Thời điểm nhận"><input type="datetime-local" name="receivedAt" defaultValue={nowLocal()} required /></Field></div><div className="line-editor"><div className="line-editor-head"><strong>Chi tiết vé</strong><button type="button" onClick={() => setBatchLines((lines) => [...lines, { key: Date.now(), drawId: "", quantityReceived: "100", unitCost: "9000", unitSalePrice: "10000", serialFrom: "", serialTo: "" }])}>＋ Thêm dòng</button></div>{batchLines.map((line, index) => <div className="batch-line-form" key={line.key}><span className="line-number">{index + 1}</span><select aria-label="Kỳ quay" value={line.drawId} onChange={(e) => setBatchLines((lines) => lines.map((item) => item.key === line.key ? { ...item, drawId: e.target.value } : item))} required><option value="">Chọn kỳ quay</option>{snapshot.draws.filter((draw) => draw.status === "OPEN").map((draw) => <option key={draw.id} value={draw.id}>{draw.provinceCode} · {formatDate(draw.drawDate)}</option>)}</select><input aria-label="Số lượng" type="number" min="1" value={line.quantityReceived} onChange={(e) => setBatchLines((lines) => lines.map((item) => item.key === line.key ? { ...item, quantityReceived: e.target.value } : item))} /><input aria-label="Giá nhập" type="number" min="0" value={line.unitCost} onChange={(e) => setBatchLines((lines) => lines.map((item) => item.key === line.key ? { ...item, unitCost: e.target.value } : item))} /><input aria-label="Giá bán" type="number" min="1" value={line.unitSalePrice} onChange={(e) => setBatchLines((lines) => lines.map((item) => item.key === line.key ? { ...item, unitSalePrice: e.target.value } : item))} />{batchLines.length > 1 && <button type="button" className="remove-line" onClick={() => setBatchLines((lines) => lines.filter((item) => item.key !== line.key))}>×</button>}</div>)}</div><Field label="Ghi chú"><textarea name="note" rows={2} /></Field></>}
+    {kind === "batch" && <>
+      <div className="entry-tabs" role="tablist"><button type="button" className={entryMode === "manual" ? "active" : ""} onClick={() => setEntryMode("manual")}>Nhập thủ công</button><button type="button" className={entryMode === "file" ? "active" : ""} onClick={() => setEntryMode("file")}>Tải file CSV/XLSX</button></div>
+      {entryMode === "file" ? <div className="import-panel"><div className="upload-box"><strong>Chọn bảng kê từ đại lý</strong><p>Hỗ trợ CSV/XLSX, tối đa 5 MB và 500 dòng. File chỉ được đọc để xem trước, chưa lưu vào hệ thống.</p><input type="file" accept=".csv,.xlsx" onChange={(event) => setImportFile(event.target.files?.[0] ?? null)} /></div><div className="import-actions"><a href="/templates/lo-ve-mau.csv" download>Tải file mẫu</a><button type="button" className="primary-button" disabled={!importFile || importing} onClick={() => void previewImport()}>{importing ? "Đang trích xuất…" : "Trích xuất & xem trước"}</button></div></div> : <>
+        {importWarnings.length > 0 && <div className="import-warning"><strong>Đã trích xuất file — hãy kiểm tra lại trước khi lưu.</strong>{importWarnings.map((warning) => <p key={warning}>• {warning}</p>)}</div>}
+        <div className="form-grid"><Field label="Đại lý"><select name="agencyId" value={batchMeta.agencyId} onChange={(event) => setBatchMeta((value) => ({ ...value, agencyId: event.target.value }))} required><option value="">Chọn đại lý</option>{snapshot.agencies.filter((agency) => agency.active).map((agency) => <option key={agency.id} value={agency.id}>{agency.name} ({agency.code})</option>)}</select></Field><Field label="Mã phiếu nhận"><input name="receiptCode" placeholder="PN-2026-001" value={batchMeta.receiptCode} onChange={(event) => setBatchMeta((value) => ({ ...value, receiptCode: event.target.value }))} required /></Field></div>
+        <div className="form-grid"><Field label="Ngày bán"><input type="date" name="businessDate" value={batchMeta.businessDate} onChange={(event) => setBatchMeta((value) => ({ ...value, businessDate: event.target.value }))} required /></Field><Field label="Thời điểm nhận"><input type="datetime-local" name="receivedAt" value={batchMeta.receivedAt} onChange={(event) => setBatchMeta((value) => ({ ...value, receivedAt: event.target.value }))} required /></Field></div>
+        <div className="line-editor"><div className="line-editor-head"><div><strong>Chi tiết vé</strong><small>Kỳ vé được tự ghi nhận từ thông tin bên dưới</small></div><button type="button" onClick={() => setBatchLines((lines) => [...lines, emptyBatchLine()])}>＋ Thêm dòng</button></div>{batchLines.map((line, index) => <div className="batch-entry-card" key={line.key}><div className="batch-entry-head"><strong>Dòng {index + 1}</strong>{batchLines.length > 1 && <button type="button" className="remove-line" onClick={() => setBatchLines((lines) => lines.filter((item) => item.key !== line.key))} aria-label={`Xóa dòng ${index + 1}`}>×</button>}</div><div className="form-grid three"><Field label="Đơn vị phát hành"><input value={line.issuerName} onChange={(event) => updateBatchLine(line.key, "issuerName", event.target.value)} placeholder="XSKT TP.HCM" required /></Field><Field label="Mã tỉnh/đài"><input value={line.provinceCode} onChange={(event) => updateBatchLine(line.key, "provinceCode", event.target.value)} placeholder="HCM" required /></Field><Field label="Khu vực"><select value={line.region} onChange={(event) => updateBatchLine(line.key, "region", event.target.value)}><option value="SOUTH">Miền Nam</option><option value="CENTRAL">Miền Trung</option><option value="NORTH">Miền Bắc</option></select></Field></div><div className="form-grid three"><Field label="Ngày quay"><input type="date" value={line.drawDate} onChange={(event) => updateBatchLine(line.key, "drawDate", event.target.value)} required /></Field><Field label="Hạn trả vé"><input type="datetime-local" value={line.returnCutoffAt} onChange={(event) => updateBatchLine(line.key, "returnCutoffAt", event.target.value)} required /></Field><Field label="Số lượng"><input type="number" min="1" value={line.quantityReceived} onChange={(event) => updateBatchLine(line.key, "quantityReceived", event.target.value)} required /></Field></div><div className="form-grid four"><Field label="Giá nhập"><input type="number" min="0" value={line.unitCost} onChange={(event) => updateBatchLine(line.key, "unitCost", event.target.value)} required /></Field><Field label="Giá bán"><input type="number" min="1" value={line.unitSalePrice} onChange={(event) => updateBatchLine(line.key, "unitSalePrice", event.target.value)} required /></Field><Field label="Serial từ (tùy chọn)"><input value={line.serialFrom} onChange={(event) => updateBatchLine(line.key, "serialFrom", event.target.value)} /></Field><Field label="Serial đến (tùy chọn)"><input value={line.serialTo} onChange={(event) => updateBatchLine(line.key, "serialTo", event.target.value)} /></Field></div></div>)}</div>
+        <Field label="Ghi chú"><textarea name="note" rows={2} value={batchMeta.note} onChange={(event) => setBatchMeta((value) => ({ ...value, note: event.target.value }))} /></Field>
+      </>}
+    </>}
     {kind === "allocation" && <><div className="form-grid"><Field label="Seller"><select name="sellerId" required><option value="">Chọn seller</option>{snapshot.sellers.filter((s) => s.status === "ACTIVE").map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></Field><Field label="Ngày bán"><input type="date" name="businessDate" defaultValue={today()} required /></Field></div><Field label="Dòng vé"><select name="batchLineId" required><option value="">Chọn lô / kỳ quay</option>{confirmedLines.map((line) => <option key={line.id} value={line.id}>{line.receiptCode} · {line.provinceCode} · {formatDate(line.drawDate)}</option>)}</select></Field><Field label="Số lượng giao"><input type="number" name="quantity" min="1" defaultValue="100" required /></Field><Field label="Ghi chú"><textarea name="note" rows={2} /></Field></>}
     {kind === "return" && <><Field label="Loại trả"><select value={returnType} onChange={(e) => setReturnType(e.target.value)}><option value="SELLER_TO_STORE">Seller trả cửa hàng</option><option value="STORE_TO_AGENCY">Cửa hàng trả đại lý</option></select></Field>{returnType === "SELLER_TO_STORE" ? <><Field label="Seller"><select name="sellerId" required><option value="">Chọn seller</option>{snapshot.sellers.map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></Field><Field label="Dòng vé đã giao"><select name="allocationLineId" required><option value="">Chọn dòng vé</option>{issuedLines.map((line) => <option key={line.id} value={line.id}>{line.sellerName} · {line.provinceCode} · {formatDate(line.drawDate)}</option>)}</select></Field></> : <><Field label="Đại lý"><select name="agencyId" required><option value="">Chọn đại lý</option>{snapshot.agencies.map((agency) => <option key={agency.id} value={agency.id}>{agency.name}</option>)}</select></Field><Field label="Dòng vé tại cửa hàng"><select name="batchLineId" required><option value="">Chọn dòng vé</option>{confirmedLines.map((line) => <option key={line.id} value={line.id}>{line.receiptCode} · {line.provinceCode}</option>)}</select></Field></>}<div className="form-grid"><Field label="Ngày bán"><input type="date" name="businessDate" defaultValue={today()} required /></Field><Field label="Số lượng"><input type="number" name="quantity" min="1" defaultValue="1" required /></Field></div><Field label="Ghi chú"><textarea name="note" rows={2} /></Field></>}
     {kind === "adjustment" && <><div className="form-grid"><Field label="Vị trí tồn"><select value={holderType} onChange={(e) => setHolderType(e.target.value)}><option value="STORE">Tại cửa hàng</option><option value="SELLER">Tại seller</option></select></Field><Field label="Loại điều chỉnh"><select name="adjustmentType" defaultValue="LOST"><option value="LOST">Thất thoát</option><option value="DAMAGED">Hư hỏng</option><option value="FOUND">Tìm thấy</option><option value="CORRECTION">Sửa sai</option></select></Field></div>{holderType === "SELLER" ? <><Field label="Seller"><select name="sellerId" required><option value="">Chọn seller</option>{snapshot.sellers.map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></Field><Field label="Dòng vé đã giao"><select name="allocationLineId" required><option value="">Chọn dòng vé</option>{issuedLines.map((line) => <option key={line.id} value={line.id}>{line.sellerName} · {line.provinceCode}</option>)}</select></Field></> : <Field label="Dòng vé tại cửa hàng"><select name="batchLineId" required><option value="">Chọn dòng vé</option>{confirmedLines.map((line) => <option key={line.id} value={line.id}>{line.receiptCode} · {line.provinceCode}</option>)}</select></Field>}<div className="form-grid"><Field label="Chiều điều chỉnh"><select name="direction" defaultValue="DECREASE"><option value="DECREASE">Giảm tồn</option><option value="INCREASE">Tăng tồn</option></select></Field><Field label="Số lượng"><input type="number" name="quantity" min="1" defaultValue="1" required /></Field></div><Field label="Lý do"><textarea name="reason" rows={3} required /></Field></>}
     {kind === "cash" && <><div className="form-grid"><Field label="Seller (để trống nếu tại quầy)"><select name="sellerId"><option value="">Giao dịch tại quầy</option>{snapshot.sellers.map((seller) => <option key={seller.id} value={seller.id}>{seller.fullName}</option>)}</select></Field><Field label="Ngày bán"><input type="date" name="businessDate" defaultValue={today()} required /></Field></div><div className="form-grid"><Field label="Chiều tiền"><select name="direction" defaultValue="IN"><option value="IN">Thu vào</option><option value="OUT">Chi ra</option></select></Field><Field label="Loại giao dịch"><select name="transactionType" defaultValue="SALES_COLLECTION"><option value="SALES_COLLECTION">Thu tiền bán vé</option><option value="REFUND">Hoàn tiền</option><option value="ADJUSTMENT">Điều chỉnh</option><option value="EXPENSE">Chi phí</option><option value="AGENCY_PAYMENT">Thanh toán đại lý</option></select></Field></div><div className="form-grid"><Field label="Số tiền"><input type="number" name="amount" min="1" step="1000" required /></Field><Field label="Phương thức"><select name="paymentMethod" defaultValue="CASH"><option value="CASH">Tiền mặt</option><option value="BANK_TRANSFER">Chuyển khoản</option><option value="EWALLET">Ví điện tử</option></select></Field></div><Field label="Thời điểm"><input type="datetime-local" name="occurredAt" defaultValue={nowLocal()} required /></Field><Field label="Ghi chú"><textarea name="note" rows={2} /></Field></>}
-    {error && <p className="form-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose}>Hủy</button><button className="primary-button" disabled={saving}>{saving ? "Đang lưu…" : "Lưu dữ liệu"}</button></footer>
+    {error && <p className="form-error">{error}</p>}<footer><button type="button" className="secondary-button" onClick={onClose}>Hủy</button><button className="primary-button" disabled={saving || (kind === "batch" && entryMode === "file")}>{saving ? "Đang lưu…" : "Lưu dữ liệu"}</button></footer>
   </form></section></div>;
 }
 

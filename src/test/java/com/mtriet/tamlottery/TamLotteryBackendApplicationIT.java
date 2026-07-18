@@ -38,6 +38,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -125,6 +126,25 @@ class TamLotteryBackendApplicationIT {
     @Test
     void contextLoadsWithFlywayAndHibernateSchemaValidation() {
         assertThat(storeRepository).isNotNull();
+    }
+
+    @Test
+    void recordsAndReusesDrawReferenceWhenReceivingBatch() {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+        int sequence = SEQUENCE.incrementAndGet();
+        MasterDataDtos.AgencyResponse agency = masterDataService.createAgency(new MasterDataDtos.CreateAgencyRequest(
+                "AG-AUTO-" + sequence, "Đại lý tự động " + sequence, null, null));
+        InventoryDtos.BatchLineRequest line = new InventoryDtos.BatchLineRequest(
+                "XSKT TP.HCM", "HCM", LotteryRegion.SOUTH, BUSINESS_DATE,
+                BUSINESS_DATE.atTime(15, 30).toInstant(ZoneOffset.UTC), 50, 9_000, 10_000, null, null);
+
+        InventoryDtos.BatchResponse batch = inventoryService.createBatch(new InventoryDtos.BatchRequest(
+                agency.id(), "AUTO-" + sequence, BUSINESS_DATE, Instant.now(), null, List.of(line, line)));
+
+        assertThat(batch.lines()).hasSize(2);
+        assertThat(batch.lines().get(0).drawId()).isEqualTo(batch.lines().get(1).drawId());
+        assertThat(masterDataService.listDraws(PageRequest.of(0, 10)).getTotalElements()).isEqualTo(1);
     }
 
     @Test
@@ -308,19 +328,23 @@ class TamLotteryBackendApplicationIT {
         int sequence = SEQUENCE.incrementAndGet();
         MasterDataDtos.AgencyResponse agency = masterDataService.createAgency(new MasterDataDtos.CreateAgencyRequest(
                 "AG-" + sequence, "Đại lý " + sequence, null, null));
-        MasterDataDtos.LotteryDrawResponse draw = masterDataService.createDraw(new MasterDataDtos.CreateLotteryDrawRequest(
-                "Công ty xổ số " + sequence,
-                "P" + sequence,
-                LotteryRegion.SOUTH,
-                businessDate,
-                businessDate.atTime(16, 0).toInstant(ZoneOffset.UTC)));
         InventoryDtos.BatchResponse batch = inventoryService.createBatch(new InventoryDtos.BatchRequest(
                 agency.id(),
                 "RCPT-" + sequence,
                 businessDate,
                 Instant.now(),
                 null,
-                List.of(new InventoryDtos.BatchLineRequest(draw.id(), quantity, 9_000, 10_000, null, null))));
+                List.of(new InventoryDtos.BatchLineRequest(
+                        "Công ty xổ số " + sequence,
+                        "P" + sequence,
+                        LotteryRegion.SOUTH,
+                        businessDate,
+                        businessDate.atTime(16, 0).toInstant(ZoneOffset.UTC),
+                        quantity,
+                        9_000,
+                        10_000,
+                        null,
+                        null))));
         batch = inventoryService.confirmBatch(batch.id());
         return new InventoryScenario(
                 businessDate, agency.id(), batch.id(), batch.lines().getFirst().id());

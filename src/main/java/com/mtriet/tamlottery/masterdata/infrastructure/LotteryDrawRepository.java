@@ -10,7 +10,7 @@ import java.util.Optional;
 
 public interface LotteryDrawRepository extends JpaRepository<LotteryDraw, Long> {
     Optional<LotteryDraw> findByIdAndStoreId(Long id, Long storeId);
+    Optional<LotteryDraw> findByStoreIdAndProvinceCodeIgnoreCaseAndDrawDate(
+            Long storeId, String provinceCode, LocalDate drawDate);
     Page<LotteryDraw> findAllByStoreId(Long storeId, Pageable pageable);
-    boolean existsByStoreIdAndProvinceCodeIgnoreCaseAndDrawDate(Long storeId, String provinceCode, LocalDate drawDate);
 }
-
