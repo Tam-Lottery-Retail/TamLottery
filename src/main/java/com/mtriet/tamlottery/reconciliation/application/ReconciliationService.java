@@ -1,5 +1,8 @@
 package com.mtriet.tamlottery.reconciliation.application;
 
+import com.mtriet.tamlottery.audit.application.AuditService;
+import com.mtriet.tamlottery.audit.domain.AuditAction;
+import com.mtriet.tamlottery.audit.domain.AuditEntityType;
 import com.mtriet.tamlottery.cash.domain.CashTransaction;
 import com.mtriet.tamlottery.cash.domain.CashTransactionStatus;
 import com.mtriet.tamlottery.cash.infrastructure.CashTransactionRepository;
@@ -62,6 +65,7 @@ public class ReconciliationService {
     private final LotteryBatchRepository batchRepository;
     private final InventoryAdjustmentRepository adjustmentRepository;
     private final CurrentUserProvider currentUserProvider;
+    private final AuditService auditService;
 
     public ReconciliationService(DailySalesRepository salesRepository,
                                  DailyReconciliationRepository reconciliationRepository,
@@ -73,7 +77,8 @@ public class ReconciliationService {
                                  TicketAllocationLineRepository allocationLineRepository,
                                  LotteryBatchRepository batchRepository,
                                  InventoryAdjustmentRepository adjustmentRepository,
-                                 CurrentUserProvider currentUserProvider) {
+                                 CurrentUserProvider currentUserProvider,
+                                 AuditService auditService) {
         this.salesRepository = salesRepository;
         this.reconciliationRepository = reconciliationRepository;
         this.calculationService = calculationService;
@@ -85,6 +90,7 @@ public class ReconciliationService {
         this.batchRepository = batchRepository;
         this.adjustmentRepository = adjustmentRepository;
         this.currentUserProvider = currentUserProvider;
+        this.auditService = auditService;
     }
 
     @Transactional(readOnly = true)
@@ -163,7 +169,10 @@ public class ReconciliationService {
                 now));
         calculation.attachableCash().forEach(cash -> cash.assignTo(reconciliation));
         freezeInventory(current.storeId(), request.businessDate(), request.scope(), request.sellerId());
-        return toReconciliationResponse(reconciliation);
+        ReconciliationDtos.ReconciliationResponse response = toReconciliationResponse(reconciliation);
+        auditService.record(current, AuditAction.RECONCILIATION_CLOSED, AuditEntityType.DAILY_RECONCILIATION,
+                reconciliation.getId(), reconciliation.getBusinessDate(), reconciliation.getNote(), null, response);
+        return response;
     }
 
     @Transactional
@@ -174,8 +183,12 @@ public class ReconciliationService {
         if (reconciliation.getStatus() != ReconciliationStatus.REVIEW_REQUIRED) {
             throw BusinessException.conflict(ErrorCode.INVALID_STATE, "Only a reconciliation requiring review can be approved");
         }
+        ReconciliationDtos.ReconciliationResponse before = toReconciliationResponse(reconciliation);
         reconciliation.approve(current.userId(), Instant.now());
-        return toReconciliationResponse(reconciliation);
+        ReconciliationDtos.ReconciliationResponse after = toReconciliationResponse(reconciliation);
+        auditService.record(current, AuditAction.RECONCILIATION_APPROVED, AuditEntityType.DAILY_RECONCILIATION,
+                reconciliation.getId(), reconciliation.getBusinessDate(), reconciliation.getNote(), before, after);
+        return after;
     }
 
     @Transactional
@@ -187,11 +200,15 @@ public class ReconciliationService {
         if (reconciliation.getStatus() != ReconciliationStatus.REVIEW_REQUIRED) {
             throw BusinessException.conflict(ErrorCode.INVALID_STATE, "Only a reconciliation requiring review can be rejected");
         }
+        ReconciliationDtos.ReconciliationResponse before = toReconciliationResponse(reconciliation);
         reconciliation.reject(reason, current.userId(), Instant.now());
         reconciliation.getDailySales().voidSnapshot();
         cashRepository.findAllByReconciliationId(reconciliation.getId()).forEach(CashTransaction::unassign);
         reopenInventory(current.storeId(), reconciliation);
-        return toReconciliationResponse(reconciliation);
+        ReconciliationDtos.ReconciliationResponse after = toReconciliationResponse(reconciliation);
+        auditService.record(current, AuditAction.RECONCILIATION_REJECTED, AuditEntityType.DAILY_RECONCILIATION,
+                reconciliation.getId(), reconciliation.getBusinessDate(), reason, before, after);
+        return after;
     }
 
     private String requireRejectionReason(String reason) {

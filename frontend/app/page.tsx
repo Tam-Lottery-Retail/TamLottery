@@ -11,7 +11,8 @@ type Section =
   | "cash"
   | "reconciliation"
   | "catalog"
-  | "team";
+  | "team"
+  | "audit";
 type ModalKind =
   | "agency"
   | "user"
@@ -48,6 +49,7 @@ type SalesLine = { batchLineId: number; provinceCode: string; drawDate: string; 
 type PreviewCash = { id: number; sellerId?: number; direction: string; transactionType: string; paymentMethod: string; amount: number; occurredAt: string };
 type Preview = { businessDate: string; scope: string; sellerId?: number; reconciliationId?: number; reconciliationStatus?: string; totalBaseQuantity: number; totalReturnedQuantity: number; totalLostQuantity: number; totalSoldQuantity: number; expectedAmount: number; actualReceivedAmount: number; sellerReconciliationAmount: number; differenceAmount: number; lines: SalesLine[]; cashTransactions: PreviewCash[] };
 type Reconciliation = { id: number; dailySalesId: number; businessDate: string; scope: string; sellerId?: number; revision: number; expectedAmount: number; actualReceivedAmount: number; differenceAmount: number; status: string; note?: string; closedAt?: string; rejectionReason?: string; reviewedBy?: number; reviewedAt?: string; cashTransactionIds: number[] };
+type AuditLog = { id: number; actorUserId: number; actorUsername: string; actorRoles: string[]; action: string; entityType: string; entityId: string; businessDate?: string; reason?: string; beforeState?: unknown; afterState?: unknown; requestId?: string; ipAddress?: string; occurredAt: string };
 type SessionClaims = { roles: Role[]; userId?: number; sellerId?: number };
 
 type Snapshot = {
@@ -62,12 +64,13 @@ type Snapshot = {
   adjustments: Adjustment[];
   cash: CashTransaction[];
   reconciliations: Reconciliation[];
+  auditLogs: AuditLog[];
   preview?: Preview;
 };
 
 const EMPTY_SNAPSHOT: Snapshot = {
   agencies: [], draws: [], users: [], sellers: [], batches: [], allocations: [],
-  returns: [], adjustments: [], cash: [], reconciliations: [],
+  returns: [], adjustments: [], cash: [], reconciliations: [], auditLogs: [],
 };
 
 const localDate = (date = new Date()) => new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 10);
@@ -112,6 +115,15 @@ const CASH_TYPE_LABELS: Record<string, string> = {
   EXPENSE: "Chi phí", AGENCY_PAYMENT: "Thanh toán đại lý",
 };
 const PAYMENT_LABELS: Record<string, string> = { CASH: "Tiền mặt", BANK_TRANSFER: "Chuyển khoản", EWALLET: "Ví điện tử" };
+const AUDIT_ACTION_LABELS: Record<string, string> = {
+  STORE_BOOTSTRAPPED: "Khởi tạo cửa hàng", AUTH_LOGIN_SUCCEEDED: "Đăng nhập", AUTH_REFRESH_ROTATED: "Làm mới phiên", AUTH_LOGOUT: "Đăng xuất",
+  USER_CREATED: "Tạo tài khoản", USER_STATUS_CHANGED: "Đổi trạng thái tài khoản", SELLER_CREATED: "Tạo người bán", SELLER_UPDATED: "Sửa người bán", SELLER_STATUS_CHANGED: "Đổi trạng thái người bán",
+  AGENCY_CREATED: "Tạo đại lý", AGENCY_STATUS_CHANGED: "Đổi trạng thái đại lý", BATCH_CREATED: "Tạo lô vé", BATCH_UPDATED: "Sửa lô vé", BATCH_CONFIRMED: "Xác nhận lô vé", BATCH_CANCELLED: "Hủy lô vé",
+  ALLOCATION_CREATED: "Tạo lượt giao vé", ALLOCATION_ISSUED: "Xác nhận giao vé", ALLOCATION_CANCELLED: "Hủy lượt giao vé", RETURN_CREATED: "Tạo phiếu trả", RETURN_CONFIRMED: "Xác nhận trả vé", RETURN_CANCELLED: "Hủy phiếu trả",
+  ADJUSTMENT_CREATED: "Tạo điều chỉnh tồn", ADJUSTMENT_APPROVED: "Duyệt điều chỉnh", ADJUSTMENT_REJECTED: "Từ chối điều chỉnh", CASH_TRANSACTION_CREATED: "Tạo giao dịch tiền", CASH_TRANSACTION_POSTED: "Ghi sổ giao dịch", CASH_TRANSACTION_VOIDED: "Hủy giao dịch tiền",
+  RECONCILIATION_CLOSED: "Chốt đối soát", RECONCILIATION_APPROVED: "Duyệt đối soát", RECONCILIATION_REJECTED: "Từ chối đối soát",
+};
+const AUDIT_ENTITY_LABELS: Record<string, string> = { STORE: "Cửa hàng", AUTH_SESSION: "Phiên đăng nhập", USER: "Tài khoản", SELLER: "Người bán", AGENCY: "Đại lý", LOTTERY_BATCH: "Lô vé", TICKET_ALLOCATION: "Giao vé", TICKET_RETURN: "Trả vé", INVENTORY_ADJUSTMENT: "Điều chỉnh tồn", CASH_TRANSACTION: "Giao dịch tiền", DAILY_RECONCILIATION: "Đối soát" };
 
 class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -182,6 +194,7 @@ const NAV_ITEMS: Array<{ id: Section; icon: string; label: string; managerOnly?:
   { id: "reconciliation", icon: "06", label: "Đối soát" },
   { id: "catalog", icon: "07", label: "Đại lý & kỳ vé", managerOnly: true },
   { id: "team", icon: "08", label: "Nhân sự", managerOnly: true },
+  { id: "audit", icon: "09", label: "Nhật ký kiểm toán", managerOnly: true },
 ];
 
 export default function Home() {
@@ -213,7 +226,7 @@ export default function Home() {
       const previewPath = isManager
         ? `/api/v1/reconciliations/preview?businessDate=${today()}&scope=STORE`
         : currentSellerId ? `/api/v1/reconciliations/preview?businessDate=${today()}&scope=SELLER&sellerId=${currentSellerId}` : "";
-      const [store, agencies, draws, users, sellers, batches, allocations, returns, adjustments, cash, reconciliations, preview] = await Promise.all([
+      const [store, agencies, draws, users, sellers, batches, allocations, returns, adjustments, cash, reconciliations, auditLogs, preview] = await Promise.all([
         api<Store>("/api/v1/stores/current"),
         isManager ? safe<PageResponse<Agency>>(`/api/v1/agencies${qs}`, { content: [], totalElements: 0 }) : Promise.resolve({ content: [], totalElements: 0 }),
         safe<PageResponse<Draw>>(`/api/v1/draws${qs}`, { content: [], totalElements: 0 }),
@@ -225,9 +238,10 @@ export default function Home() {
         safe<PageResponse<Adjustment>>(`/api/v1/inventory-adjustments${qs}`, { content: [], totalElements: 0 }),
         safe<PageResponse<CashTransaction>>(`/api/v1/cash-transactions${qs}`, { content: [], totalElements: 0 }),
         safe<PageResponse<Reconciliation>>(`/api/v1/reconciliations${qs}`, { content: [], totalElements: 0 }),
+        isManager ? safe<PageResponse<AuditLog>>("/api/v1/audit-logs?size=100&sort=occurredAt,desc", { content: [], totalElements: 0 }) : Promise.resolve({ content: [], totalElements: 0 }),
         previewPath ? safe<Preview>(previewPath, undefined as unknown as Preview) : Promise.resolve(undefined as unknown as Preview),
       ]);
-      setSnapshot({ store, agencies: pageContent(agencies), draws: pageContent(draws), users: pageContent(users), sellers: pageContent(sellers), batches: pageContent(batches), allocations: pageContent(allocations), returns: pageContent(returns), adjustments: pageContent(adjustments), cash: pageContent(cash), reconciliations: pageContent(reconciliations), preview });
+      setSnapshot({ store, agencies: pageContent(agencies), draws: pageContent(draws), users: pageContent(users), sellers: pageContent(sellers), batches: pageContent(batches), allocations: pageContent(allocations), returns: pageContent(returns), adjustments: pageContent(adjustments), cash: pageContent(cash), reconciliations: pageContent(reconciliations), auditLogs: pageContent(auditLogs), preview });
       setAuthenticated(true);
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -319,6 +333,7 @@ export default function Home() {
           {active === "reconciliation" && <ReconciliationView items={snapshot.reconciliations} sellers={snapshot.sellers} isManager={isManager} isOwner={isOwner} currentSellerId={currentSellerId} onAction={perform} onReasonAction={setReasonAction} notify={notify} reload={load} />}
           {active === "catalog" && <CatalogView agencies={snapshot.agencies} draws={snapshot.draws} />}
           {active === "team" && <TeamView users={snapshot.users} sellers={snapshot.sellers} isOwner={isOwner} currentUserId={currentUserId} onOpen={setModal} onEditSeller={setEditingSeller} onAction={perform} />}
+          {active === "audit" && <AuditView items={snapshot.auditLogs} />}
         </section>
       </main>
 
@@ -498,6 +513,27 @@ function ReconciliationView({ items, sellers, isManager, isOwner, currentSellerI
     <div className="panel"><PanelHeader title="Lịch sử đối soát" subtitle="Snapshot không thể chỉnh sửa trực tiếp sau khi chốt" count={items.length} /><DataTable headers={["Ngày", "Phạm vi", "Dự kiến", "Thực nhận", "Chênh lệch", "Giao dịch", "Trạng thái", ""]} empty="Chưa có lần đối soát">
       {items.map((item) => <tr key={item.id}><td><strong>{formatDate(item.businessDate)}</strong><small>Lần #{item.revision}</small></td><td>{item.scope === "STORE" ? "Cửa hàng" : sellers.find((seller) => seller.id === item.sellerId)?.fullName ?? `Seller #${item.sellerId}`}</td><td>{formatMoney(item.expectedAmount)}</td><td>{formatMoney(item.actualReceivedAmount)}</td><td className={item.differenceAmount === 0 ? "positive" : "negative"}>{formatMoney(item.differenceAmount)}</td><td>{number.format(item.cashTransactionIds?.length ?? 0)}</td><td><Status value={item.status} />{item.rejectionReason && <small className="audit-reason">Lý do: {item.rejectionReason}</small>}{item.reviewedAt && <small>User #{item.reviewedBy} · {formatDateTime(item.reviewedAt)}</small>}</td><td><div className="inline-actions">{isOwner && item.status === "REVIEW_REQUIRED" && <><button className="table-action" onClick={() => void onAction(`/api/v1/reconciliations/${item.id}/approve`, "Đã duyệt đối soát")}>Duyệt</button><button className="table-action danger-link" onClick={() => onReasonAction({ path: `/api/v1/reconciliations/${item.id}/reject`, title: `Từ chối đối soát #${item.id}`, description: "Dữ liệu vé và tiền sẽ được mở lại để chỉnh sửa. Lý do từ chối là bắt buộc và được lưu trong lịch sử.", success: "Đã từ chối và mở lại dữ liệu", confirmLabel: "Xác nhận từ chối" })}>Từ chối</button></>}</div></td></tr>)}
     </DataTable></div></div>;
+}
+
+function AuditView({ items }: { items: AuditLog[] }) {
+  const [query, setQuery] = useState("");
+  const [action, setAction] = useState("");
+  const [entityType, setEntityType] = useState("");
+  const actions = Array.from(new Set(items.map((item) => item.action))).sort();
+  const entityTypes = Array.from(new Set(items.map((item) => item.entityType))).sort();
+  const normalizedQuery = query.trim().toLowerCase();
+  const filtered = items.filter((item) => {
+    if (action && item.action !== action) return false;
+    if (entityType && item.entityType !== entityType) return false;
+    if (!normalizedQuery) return true;
+    return [item.actorUsername, item.entityId, item.reason, item.requestId, item.action, item.entityType]
+      .filter(Boolean)
+      .some((value) => String(value).toLowerCase().includes(normalizedQuery));
+  });
+
+  return <div className="stack-lg"><div className="panel"><PanelHeader title="Nhật ký kiểm toán" subtitle="Lịch sử bất biến của các thao tác quan trọng; hiển thị tối đa 100 bản ghi gần nhất" count={filtered.length} /><div className="filter-row audit-filters"><label>Tìm kiếm<input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Actor, ID, lý do, request ID…" /></label><label>Hành động<select value={action} onChange={(event) => setAction(event.target.value)}><option value="">Tất cả</option>{actions.map((value) => <option key={value} value={value}>{AUDIT_ACTION_LABELS[value] ?? value}</option>)}</select></label><label>Đối tượng<select value={entityType} onChange={(event) => setEntityType(event.target.value)}><option value="">Tất cả</option>{entityTypes.map((value) => <option key={value} value={value}>{AUDIT_ENTITY_LABELS[value] ?? value}</option>)}</select></label></div><DataTable headers={["Thời điểm", "Người thực hiện", "Hành động", "Đối tượng", "Ngày bán", "Lý do / Request", "Dữ liệu"]} empty="Chưa có bản ghi kiểm toán phù hợp">
+    {filtered.map((item) => <tr key={item.id}><td><strong>{formatDateTime(item.occurredAt)}</strong><small>Audit #{item.id}</small></td><td><strong>@{item.actorUsername}</strong><small>User #{item.actorUserId} · {item.actorRoles.join(", ")}</small></td><td>{AUDIT_ACTION_LABELS[item.action] ?? item.action}</td><td><strong>{AUDIT_ENTITY_LABELS[item.entityType] ?? item.entityType}</strong><small>#{item.entityId}</small></td><td>{item.businessDate ? formatDate(item.businessDate) : "—"}</td><td>{item.reason || "—"}<small>{item.requestId ? `Request: ${item.requestId}` : "Ngoài HTTP request"}{item.ipAddress ? ` · IP ${item.ipAddress}` : ""}</small></td><td>{item.beforeState || item.afterState ? <details className="audit-details"><summary>Xem thay đổi</summary><div className="audit-json-grid"><div><strong>Trước</strong><pre>{item.beforeState ? JSON.stringify(item.beforeState, null, 2) : "—"}</pre></div><div><strong>Sau</strong><pre>{item.afterState ? JSON.stringify(item.afterState, null, 2) : "—"}</pre></div></div></details> : "—"}</td></tr>)}
+  </DataTable></div></div>;
 }
 
 function CatalogView({ agencies, draws }: { agencies: Agency[]; draws: Draw[] }) {

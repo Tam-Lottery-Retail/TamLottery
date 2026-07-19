@@ -1,5 +1,9 @@
 package com.mtriet.tamlottery;
 
+import com.mtriet.tamlottery.audit.api.AuditDtos;
+import com.mtriet.tamlottery.audit.application.AuditService;
+import com.mtriet.tamlottery.audit.domain.AuditAction;
+import com.mtriet.tamlottery.audit.domain.AuditEntityType;
 import com.mtriet.tamlottery.cash.api.CashDtos;
 import com.mtriet.tamlottery.cash.application.CashService;
 import com.mtriet.tamlottery.cash.domain.CashDirection;
@@ -44,6 +48,7 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
 import org.springframework.data.domain.PageRequest;
+import org.springframework.http.MediaType;
 import org.springframework.security.core.GrantedAuthority;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
@@ -74,6 +79,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.jwt;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
@@ -126,6 +133,9 @@ class TamLotteryBackendApplicationIT {
     private ReconciliationService reconciliationService;
 
     @Autowired
+    private AuditService auditService;
+
+    @Autowired
     private MockMvc mockMvc;
 
     @AfterEach
@@ -147,6 +157,69 @@ class TamLotteryBackendApplicationIT {
                 .andExpect(jsonPath("$.components.securitySchemes.bearerAuth.scheme").value("bearer"));
         mockMvc.perform(get("/swagger-ui.html"))
                 .andExpect(status().is3xxRedirection());
+    }
+
+    @Test
+    void recordsImmutableStoreScopedAuditTrailAndProtectsItFromSellers() throws Exception {
+        Actor owner = createActor(Role.OWNER);
+        authenticate(owner, null);
+        MasterDataDtos.AgencyResponse agency = masterDataService.createAgency(
+                new MasterDataDtos.CreateAgencyRequest("AUDIT-AGENCY", "Đại lý audit", null, null));
+
+        AuditDtos.AuditLogResponse audit = auditService.search(
+                        AuditAction.AGENCY_CREATED,
+                        AuditEntityType.AGENCY,
+                        agency.id().toString(),
+                        owner.user().getId(),
+                        null,
+                        null,
+                        PageRequest.of(0, 10))
+                .getContent()
+                .getFirst();
+
+        assertThat(audit.actorUsername()).isEqualTo(owner.user().getUsername());
+        assertThat(audit.actorRoles()).containsExactly("OWNER");
+        assertThat(audit.beforeState()).isNull();
+        assertThat(audit.afterState().path("name").asText()).isEqualTo("Đại lý audit");
+
+        mockMvc.perform(patch("/api/v1/agencies/{id}/status", agency.id())
+                        .header("X-Request-ID", "audit-request-123")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"active\":false}")
+                        .with(jwtFor(owner, null, Role.OWNER)))
+                .andExpect(status().isOk())
+                .andExpect(header().string("X-Request-ID", "audit-request-123"));
+        authenticate(owner, null);
+        AuditDtos.AuditLogResponse statusAudit = auditService.search(
+                        AuditAction.AGENCY_STATUS_CHANGED,
+                        AuditEntityType.AGENCY,
+                        agency.id().toString(),
+                        owner.user().getId(),
+                        null,
+                        null,
+                        PageRequest.of(0, 10))
+                .getContent()
+                .getFirst();
+        assertThat(statusAudit.requestId()).isEqualTo("audit-request-123");
+        assertThat(statusAudit.ipAddress()).isNotBlank();
+
+        Actor anotherStoreOwner = createActor(Role.OWNER);
+        authenticate(anotherStoreOwner, null);
+        assertThat(auditService.search(
+                null, null, null, null, null, null, PageRequest.of(0, 10))).isEmpty();
+
+        SellerActor sellerActor = createSellerActor(owner);
+        mockMvc.perform(get("/api/v1/audit-logs")
+                        .with(jwtFor(sellerActor.actor(), sellerActor.seller(), Role.SELLER)))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/v1/audit-logs")
+                        .param("action", "AGENCY_CREATED")
+                        .param("entityType", "AGENCY")
+                        .param("entityId", agency.id().toString())
+                        .with(jwtFor(owner, null, Role.OWNER)))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].entityId").value(agency.id().toString()))
+                .andExpect(jsonPath("$.content[0].afterState.name").value("Đại lý audit"));
     }
 
     @Test

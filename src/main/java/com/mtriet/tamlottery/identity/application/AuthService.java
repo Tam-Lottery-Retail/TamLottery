@@ -1,5 +1,8 @@
 package com.mtriet.tamlottery.identity.application;
 
+import com.mtriet.tamlottery.audit.application.AuditService;
+import com.mtriet.tamlottery.audit.domain.AuditAction;
+import com.mtriet.tamlottery.audit.domain.AuditEntityType;
 import com.mtriet.tamlottery.common.exception.BusinessException;
 import com.mtriet.tamlottery.common.exception.ErrorCode;
 import com.mtriet.tamlottery.identity.api.AuthDtos.TokenResponse;
@@ -21,6 +24,7 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.Base64;
 import java.util.HexFormat;
+import java.util.Map;
 
 @Service
 public class AuthService {
@@ -30,18 +34,21 @@ public class AuthService {
     private final PasswordEncoder passwordEncoder;
     private final JwtService jwtService;
     private final JwtProperties properties;
+    private final AuditService auditService;
     private final SecureRandom secureRandom = new SecureRandom();
 
     public AuthService(UserAccountRepository userRepository,
                        RefreshTokenRepository refreshTokenRepository,
                        PasswordEncoder passwordEncoder,
                        JwtService jwtService,
-                       JwtProperties properties) {
+                       JwtProperties properties,
+                       AuditService auditService) {
         this.userRepository = userRepository;
         this.refreshTokenRepository = refreshTokenRepository;
         this.passwordEncoder = passwordEncoder;
         this.jwtService = jwtService;
         this.properties = properties;
+        this.auditService = auditService;
     }
 
     @Transactional
@@ -51,7 +58,11 @@ public class AuthService {
         if (user.getStatus() != UserStatus.ACTIVE || !passwordEncoder.matches(password, user.getPasswordHash())) {
             throw invalidCredentials();
         }
-        return issue(user, Instant.now());
+        TokenResponse response = issue(user, Instant.now());
+        auditService.record(user, AuditAction.AUTH_LOGIN_SUCCEEDED, AuditEntityType.AUTH_SESSION,
+                user.getId(), null, null, null,
+                Map.of("username", user.getUsername(), "roles", user.getRoles()));
+        return response;
     }
 
     @Transactional
@@ -67,18 +78,26 @@ public class AuthService {
         existing.revoke(now, replacement.hash());
         refreshTokenRepository.save(new RefreshToken(
                 existing.getUser(), replacement.hash(), now.plus(properties.refreshTokenTtl())));
-        return new TokenResponse(
+        TokenResponse response = new TokenResponse(
                 "Bearer",
                 jwtService.createAccessToken(existing.getUser(), now),
                 replacement.raw(),
                 properties.accessTokenTtl().toSeconds());
+        auditService.record(existing.getUser(), AuditAction.AUTH_REFRESH_ROTATED, AuditEntityType.AUTH_SESSION,
+                existing.getUser().getId(), null, null, null, Map.of("rotatedAt", now));
+        return response;
     }
 
     @Transactional
     public void logout(String rawRefreshToken) {
         refreshTokenRepository.findByTokenHash(hash(rawRefreshToken))
                 .filter(token -> token.getRevokedAt() == null)
-                .ifPresent(token -> token.revoke(Instant.now(), null));
+                .ifPresent(token -> {
+                    Instant now = Instant.now();
+                    token.revoke(now, null);
+                    auditService.record(token.getUser(), AuditAction.AUTH_LOGOUT, AuditEntityType.AUTH_SESSION,
+                            token.getUser().getId(), null, null, null, Map.of("loggedOutAt", now));
+                });
     }
 
     private TokenResponse issue(UserAccount user, Instant now) {
@@ -118,4 +137,3 @@ public class AuthService {
     private record RawRefresh(String raw, String hash) {
     }
 }
-

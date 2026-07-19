@@ -7,6 +7,8 @@ services:
       DB_URL: ${DB_URL:?DB_URL is required}
       DB_USERNAME: ${DB_USERNAME:?DB_USERNAME is required}
       DB_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD is required}
+      FLYWAY_DB_USERNAME: ${FLYWAY_DB_USERNAME:-${DB_USERNAME}}
+      FLYWAY_DB_PASSWORD: ${FLYWAY_DB_PASSWORD:-${DB_PASSWORD}}
       DB_POOL_MAX_SIZE: ${DB_POOL_MAX_SIZE:-5}
       DB_POOL_MIN_IDLE: ${DB_POOL_MIN_IDLE:-1}
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
@@ -19,6 +21,11 @@ services:
     ports:
       - "${APP_PORT:-8080}:8080"
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
     healthcheck:
       test: ["CMD", "curl", "--fail", "http://localhost:8080/actuator/health"]
       interval: 10s
@@ -36,6 +43,11 @@ services:
       app:
         condition: service_healthy
     restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1:3000/"]
       interval: 10s

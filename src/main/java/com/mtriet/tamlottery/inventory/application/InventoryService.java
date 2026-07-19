@@ -1,5 +1,8 @@
 package com.mtriet.tamlottery.inventory.application;
 
+import com.mtriet.tamlottery.audit.application.AuditService;
+import com.mtriet.tamlottery.audit.domain.AuditAction;
+import com.mtriet.tamlottery.audit.domain.AuditEntityType;
 import com.mtriet.tamlottery.common.exception.BusinessException;
 import com.mtriet.tamlottery.common.exception.ErrorCode;
 import com.mtriet.tamlottery.identity.domain.Role;
@@ -67,6 +70,7 @@ public class InventoryService {
     private final InventoryAdjustmentRepository adjustmentRepository;
     private final InventoryAvailabilityService availabilityService;
     private final CurrentUserProvider currentUserProvider;
+    private final AuditService auditService;
 
     public InventoryService(StoreRepository storeRepository,
                             SellerRepository sellerRepository,
@@ -79,7 +83,8 @@ public class InventoryService {
                             TicketReturnRepository returnRepository,
                             InventoryAdjustmentRepository adjustmentRepository,
                             InventoryAvailabilityService availabilityService,
-                            CurrentUserProvider currentUserProvider) {
+                            CurrentUserProvider currentUserProvider,
+                            AuditService auditService) {
         this.storeRepository = storeRepository;
         this.sellerRepository = sellerRepository;
         this.agencyRepository = agencyRepository;
@@ -92,11 +97,13 @@ public class InventoryService {
         this.adjustmentRepository = adjustmentRepository;
         this.availabilityService = availabilityService;
         this.currentUserProvider = currentUserProvider;
+        this.auditService = auditService;
     }
 
     @Transactional
     public InventoryDtos.BatchResponse createBatch(InventoryDtos.BatchRequest request) {
-        Long storeId = currentUserProvider.get().storeId();
+        CurrentUser current = currentUserProvider.get();
+        Long storeId = current.storeId();
         if (batchRepository.existsByStoreIdAndReceiptCodeIgnoreCase(storeId, request.receiptCode())) {
             throw BusinessException.conflict(ErrorCode.DUPLICATE_RESOURCE, "Receipt code already exists");
         }
@@ -105,14 +112,20 @@ public class InventoryService {
         LotteryBatch batch = new LotteryBatch(
                 store, agency, request.receiptCode(), request.businessDate(), request.receivedAt(), request.note());
         buildBatchLines(request.lines(), store, request.receivedAt()).forEach(batch::addLine);
-        return toBatchResponse(batchRepository.save(batch));
+        batchRepository.save(batch);
+        InventoryDtos.BatchResponse response = toBatchResponse(batch);
+        auditService.record(current, AuditAction.BATCH_CREATED, AuditEntityType.LOTTERY_BATCH,
+                batch.getId(), batch.getBusinessDate(), batch.getNote(), null, response);
+        return response;
     }
 
     @Transactional
     public InventoryDtos.BatchResponse updateBatch(Long id, InventoryDtos.BatchRequest request) {
-        Long storeId = currentUserProvider.get().storeId();
+        CurrentUser current = currentUserProvider.get();
+        Long storeId = current.storeId();
         LotteryBatch batch = batchRepository.findForUpdate(id, storeId)
                 .orElseThrow(() -> BusinessException.notFound("Lottery batch not found"));
+        InventoryDtos.BatchResponse before = toBatchResponse(batch);
         requireState(batch.getStatus() == LotteryBatchStatus.DRAFT, "Only a draft batch can be updated");
         if (batchRepository.existsByStoreIdAndReceiptCodeIgnoreCaseAndIdNot(storeId, request.receiptCode(), id)) {
             throw BusinessException.conflict(ErrorCode.DUPLICATE_RESOURCE, "Receipt code already exists");
@@ -124,7 +137,10 @@ public class InventoryService {
                 request.receivedAt(),
                 request.note(),
                 buildBatchLines(request.lines(), batch.getStore(), request.receivedAt()));
-        return toBatchResponse(batch);
+        InventoryDtos.BatchResponse after = toBatchResponse(batch);
+        auditService.record(current, AuditAction.BATCH_UPDATED, AuditEntityType.LOTTERY_BATCH,
+                batch.getId(), batch.getBusinessDate(), batch.getNote(), before, after);
+        return after;
     }
 
     @Transactional
@@ -136,16 +152,24 @@ public class InventoryService {
         if (batch.getLines().isEmpty()) {
             throw BusinessException.invalid(ErrorCode.INVALID_REQUEST, "Batch must contain at least one line");
         }
+        InventoryDtos.BatchResponse before = toBatchResponse(batch);
         batch.confirm(current.userId(), Instant.now());
-        return toBatchResponse(batch);
+        InventoryDtos.BatchResponse after = toBatchResponse(batch);
+        auditService.record(current, AuditAction.BATCH_CONFIRMED, AuditEntityType.LOTTERY_BATCH,
+                batch.getId(), batch.getBusinessDate(), batch.getNote(), before, after);
+        return after;
     }
 
     @Transactional
     public void cancelBatch(Long id) {
-        LotteryBatch batch = batchRepository.findForUpdate(id, currentUserProvider.get().storeId())
+        CurrentUser current = currentUserProvider.get();
+        LotteryBatch batch = batchRepository.findForUpdate(id, current.storeId())
                 .orElseThrow(() -> BusinessException.notFound("Lottery batch not found"));
         requireState(batch.getStatus() == LotteryBatchStatus.DRAFT, "Only a draft batch can be cancelled");
+        InventoryDtos.BatchResponse before = toBatchResponse(batch);
         batch.cancel();
+        auditService.record(current, AuditAction.BATCH_CANCELLED, AuditEntityType.LOTTERY_BATCH,
+                batch.getId(), batch.getBusinessDate(), batch.getNote(), before, toBatchResponse(batch));
     }
 
     @Transactional(readOnly = true)
@@ -162,7 +186,8 @@ public class InventoryService {
 
     @Transactional
     public InventoryDtos.AllocationResponse createAllocation(InventoryDtos.AllocationRequest request) {
-        Long storeId = currentUserProvider.get().storeId();
+        CurrentUser current = currentUserProvider.get();
+        Long storeId = current.storeId();
         Seller seller = requireSeller(request.sellerId(), storeId);
         Store store = storeRepository.getReferenceById(storeId);
         TicketAllocation allocation = new TicketAllocation(store, seller, request.businessDate(), request.note());
@@ -177,7 +202,11 @@ public class InventoryService {
             }
             allocation.addLine(new TicketAllocationLine(line, lineRequest.quantity()));
         }
-        return toAllocationResponse(allocationRepository.save(allocation));
+        allocationRepository.save(allocation);
+        InventoryDtos.AllocationResponse response = toAllocationResponse(allocation);
+        auditService.record(current, AuditAction.ALLOCATION_CREATED, AuditEntityType.TICKET_ALLOCATION,
+                allocation.getId(), allocation.getBusinessDate(), allocation.getNote(), null, response);
+        return response;
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
@@ -189,6 +218,7 @@ public class InventoryService {
         if (allocation.getLines().isEmpty()) {
             throw BusinessException.invalid(ErrorCode.INVALID_REQUEST, "Allocation must contain at least one line");
         }
+        InventoryDtos.AllocationResponse before = toAllocationResponse(allocation);
         List<Long> ids = allocation.getLines().stream().map(line -> line.getBatchLine().getId()).sorted().toList();
         List<LotteryBatchLine> locked = batchLineRepository.findAllForUpdate(ids, current.storeId());
         if (locked.size() != ids.size()) {
@@ -206,15 +236,22 @@ public class InventoryService {
             }
         }
         allocation.issue(current.userId(), Instant.now());
-        return toAllocationResponse(allocation);
+        InventoryDtos.AllocationResponse after = toAllocationResponse(allocation);
+        auditService.record(current, AuditAction.ALLOCATION_ISSUED, AuditEntityType.TICKET_ALLOCATION,
+                allocation.getId(), allocation.getBusinessDate(), allocation.getNote(), before, after);
+        return after;
     }
 
     @Transactional
     public void cancelAllocation(Long id) {
-        TicketAllocation allocation = allocationRepository.findForUpdate(id, currentUserProvider.get().storeId())
+        CurrentUser current = currentUserProvider.get();
+        TicketAllocation allocation = allocationRepository.findForUpdate(id, current.storeId())
                 .orElseThrow(() -> BusinessException.notFound("Ticket allocation not found"));
         requireState(allocation.getStatus() == TicketAllocationStatus.DRAFT, "Only a draft allocation can be cancelled");
+        InventoryDtos.AllocationResponse before = toAllocationResponse(allocation);
         allocation.cancel();
+        auditService.record(current, AuditAction.ALLOCATION_CANCELLED, AuditEntityType.TICKET_ALLOCATION,
+                allocation.getId(), allocation.getBusinessDate(), allocation.getNote(), before, toAllocationResponse(allocation));
     }
 
     @Transactional(readOnly = true)
@@ -265,7 +302,11 @@ public class InventoryService {
             }
             ticketReturn.addLine(new TicketReturnLine(batchLine, allocationLine, lineRequest.quantity()));
         }
-        return toReturnResponse(returnRepository.save(ticketReturn));
+        returnRepository.save(ticketReturn);
+        InventoryDtos.ReturnResponse response = toReturnResponse(ticketReturn);
+        auditService.record(current, AuditAction.RETURN_CREATED, AuditEntityType.TICKET_RETURN,
+                ticketReturn.getId(), ticketReturn.getBusinessDate(), ticketReturn.getNote(), null, response);
+        return response;
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
@@ -274,6 +315,7 @@ public class InventoryService {
         TicketReturn ticketReturn = returnRepository.findForUpdate(id, current.storeId())
                 .orElseThrow(() -> BusinessException.notFound("Ticket return not found"));
         requireState(ticketReturn.getStatus() == TicketReturnStatus.DRAFT, "Only a draft return can be confirmed");
+        InventoryDtos.ReturnResponse before = toReturnResponse(ticketReturn);
         Instant confirmedAt = Instant.now();
 
         List<Long> batchLineIds = ticketReturn.getLines().stream().map(line -> line.getBatchLine().getId()).distinct().sorted().toList();
@@ -309,7 +351,10 @@ public class InventoryService {
             }
         }
         ticketReturn.confirm(current.userId(), confirmedAt);
-        return toReturnResponse(ticketReturn);
+        InventoryDtos.ReturnResponse after = toReturnResponse(ticketReturn);
+        auditService.record(current, AuditAction.RETURN_CONFIRMED, AuditEntityType.TICKET_RETURN,
+                ticketReturn.getId(), ticketReturn.getBusinessDate(), ticketReturn.getNote(), before, after);
+        return after;
     }
 
     @Transactional
@@ -321,7 +366,10 @@ public class InventoryService {
             throw new BusinessException(ErrorCode.FORBIDDEN, org.springframework.http.HttpStatus.FORBIDDEN, "Seller cannot cancel this return");
         }
         requireState(ticketReturn.getStatus() == TicketReturnStatus.DRAFT, "Only a draft return can be cancelled");
+        InventoryDtos.ReturnResponse before = toReturnResponse(ticketReturn);
         ticketReturn.cancel();
+        auditService.record(current, AuditAction.RETURN_CANCELLED, AuditEntityType.TICKET_RETURN,
+                ticketReturn.getId(), ticketReturn.getBusinessDate(), ticketReturn.getNote(), before, toReturnResponse(ticketReturn));
     }
 
     @Transactional(readOnly = true)
@@ -382,7 +430,11 @@ public class InventoryService {
                 request.quantity(),
                 request.reason(),
                 current.userId());
-        return toAdjustmentResponse(adjustmentRepository.save(adjustment));
+        adjustmentRepository.save(adjustment);
+        InventoryDtos.AdjustmentResponse response = toAdjustmentResponse(adjustment);
+        auditService.record(current, AuditAction.ADJUSTMENT_CREATED, AuditEntityType.INVENTORY_ADJUSTMENT,
+                adjustment.getId(), adjustment.getBatchLine().getBatch().getBusinessDate(), adjustment.getReason(), null, response);
+        return response;
     }
 
     @Transactional(isolation = Isolation.READ_COMMITTED)
@@ -391,6 +443,7 @@ public class InventoryService {
         InventoryAdjustment adjustment = adjustmentRepository.findForUpdate(id, current.storeId())
                 .orElseThrow(() -> BusinessException.notFound("Inventory adjustment not found"));
         requireState(adjustment.getStatus() == InventoryAdjustmentStatus.PENDING, "Only a pending adjustment can be approved");
+        InventoryDtos.AdjustmentResponse before = toAdjustmentResponse(adjustment);
 
         batchLineRepository.findAllForUpdate(List.of(adjustment.getBatchLine().getId()), current.storeId());
         long available;
@@ -410,7 +463,10 @@ public class InventoryService {
             throw BusinessException.invalid(ErrorCode.ADJUSTMENT_EXCEEDS_INVENTORY, "Found quantity exceeds previously lost quantity");
         }
         adjustment.approve(current.userId(), Instant.now());
-        return toAdjustmentResponse(adjustment);
+        InventoryDtos.AdjustmentResponse after = toAdjustmentResponse(adjustment);
+        auditService.record(current, AuditAction.ADJUSTMENT_APPROVED, AuditEntityType.INVENTORY_ADJUSTMENT,
+                adjustment.getId(), adjustment.getBatchLine().getBatch().getBusinessDate(), adjustment.getReason(), before, after);
+        return after;
     }
 
     @Transactional
@@ -419,8 +475,12 @@ public class InventoryService {
         InventoryAdjustment adjustment = adjustmentRepository.findForUpdate(id, current.storeId())
                 .orElseThrow(() -> BusinessException.notFound("Inventory adjustment not found"));
         requireState(adjustment.getStatus() == InventoryAdjustmentStatus.PENDING, "Only a pending adjustment can be rejected");
+        InventoryDtos.AdjustmentResponse before = toAdjustmentResponse(adjustment);
         adjustment.reject(current.userId(), Instant.now());
-        return toAdjustmentResponse(adjustment);
+        InventoryDtos.AdjustmentResponse after = toAdjustmentResponse(adjustment);
+        auditService.record(current, AuditAction.ADJUSTMENT_REJECTED, AuditEntityType.INVENTORY_ADJUSTMENT,
+                adjustment.getId(), adjustment.getBatchLine().getBatch().getBusinessDate(), adjustment.getReason(), before, after);
+        return after;
     }
 
     @Transactional(readOnly = true)

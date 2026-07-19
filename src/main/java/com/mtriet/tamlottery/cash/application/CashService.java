@@ -1,5 +1,8 @@
 package com.mtriet.tamlottery.cash.application;
 
+import com.mtriet.tamlottery.audit.application.AuditService;
+import com.mtriet.tamlottery.audit.domain.AuditAction;
+import com.mtriet.tamlottery.audit.domain.AuditEntityType;
 import com.mtriet.tamlottery.cash.api.CashDtos;
 import com.mtriet.tamlottery.cash.domain.CashDirection;
 import com.mtriet.tamlottery.cash.domain.CashTransaction;
@@ -46,19 +49,22 @@ public class CashService {
     private final CurrentUserProvider currentUserProvider;
     private final TicketAllocationLineRepository allocationLineRepository;
     private final InventoryAvailabilityService availabilityService;
+    private final AuditService auditService;
 
     public CashService(CashTransactionRepository cashRepository,
                        StoreRepository storeRepository,
                        SellerRepository sellerRepository,
                        CurrentUserProvider currentUserProvider,
                        TicketAllocationLineRepository allocationLineRepository,
-                       InventoryAvailabilityService availabilityService) {
+                       InventoryAvailabilityService availabilityService,
+                       AuditService auditService) {
         this.cashRepository = cashRepository;
         this.storeRepository = storeRepository;
         this.sellerRepository = sellerRepository;
         this.currentUserProvider = currentUserProvider;
         this.allocationLineRepository = allocationLineRepository;
         this.availabilityService = availabilityService;
+        this.auditService = auditService;
     }
 
     @Transactional
@@ -91,7 +97,11 @@ public class CashService {
                 request.note(),
                 current.userId());
         attachAndValidateSources(transaction, seller, request);
-        return toResponse(cashRepository.save(transaction));
+        cashRepository.save(transaction);
+        CashDtos.CashTransactionResponse response = toResponse(transaction);
+        auditService.record(current, AuditAction.CASH_TRANSACTION_CREATED, AuditEntityType.CASH_TRANSACTION,
+                transaction.getId(), transaction.getBusinessDate(), transaction.getNote(), null, response);
+        return response;
     }
 
     @Transactional(readOnly = true)
@@ -125,8 +135,12 @@ public class CashService {
         if (transaction.getStatus() != CashTransactionStatus.PENDING) {
             throw BusinessException.conflict(ErrorCode.INVALID_STATE, "Only a pending cash transaction can be posted");
         }
+        CashDtos.CashTransactionResponse before = toResponse(transaction);
         transaction.post(current.userId(), Instant.now());
-        return toResponse(transaction);
+        CashDtos.CashTransactionResponse after = toResponse(transaction);
+        auditService.record(current, AuditAction.CASH_TRANSACTION_POSTED, AuditEntityType.CASH_TRANSACTION,
+                transaction.getId(), transaction.getBusinessDate(), transaction.getNote(), before, after);
+        return after;
     }
 
     @Transactional
@@ -143,9 +157,13 @@ public class CashService {
         if (transaction.getReconciliation() != null) {
             throw BusinessException.conflict(ErrorCode.INVALID_STATE, "Reconciled cash transaction cannot be voided");
         }
+        CashDtos.CashTransactionResponse before = toResponse(transaction);
         releaseCollectionCapacity(transaction);
         transaction.voidTransaction(reason, current.userId(), Instant.now());
-        return toResponse(transaction);
+        CashDtos.CashTransactionResponse after = toResponse(transaction);
+        auditService.record(current, AuditAction.CASH_TRANSACTION_VOIDED, AuditEntityType.CASH_TRANSACTION,
+                transaction.getId(), transaction.getBusinessDate(), reason, before, after);
+        return after;
     }
 
     @Transactional(readOnly = true)

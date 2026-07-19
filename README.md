@@ -15,6 +15,7 @@ TamLottery là MVP quản lý vận hành dành cho cửa hàng vé số cấp 2
 - Ghi nhận, xác nhận và hủy giao dịch tiền.
 - Đối soát seller trước, sau đó đối soát toàn cửa hàng.
 - DailySales snapshot không cho chỉnh sửa trực tiếp sau khi chốt.
+- Audit log append-only lưu actor, action, lý do, request ID và snapshot trước/sau.
 - Store isolation và seller isolation tại backend.
 - Transaction, pessimistic locking, `@Version` và unique constraints chống oversell/trùng dữ liệu.
 - Docker, Aiven MySQL, Flyway, JUnit và MySQL Testcontainers.
@@ -32,6 +33,7 @@ flowchart LR
         Inventory["Batch / Allocation / Return / Loss"]
         Cash["Cash Transaction"]
         Reconciliation["Daily Sales & Reconciliation"]
+        Audit["Immutable Audit Log"]
     end
 
     API --> Identity
@@ -39,12 +41,14 @@ flowchart LR
     API --> Inventory
     API --> Cash
     API --> Reconciliation
+    API --> Audit
 
     Identity --> Database[("Aiven MySQL 8.4")]
     MasterData --> Database
     Inventory --> Database
     Cash --> Database
     Reconciliation --> Database
+    Audit --> Database
     Flyway["Flyway migrations"] --> Database
 ```
 
@@ -86,6 +90,7 @@ erDiagram
 
     STORE ||--o{ DAILY_SALES : snapshots
     STORE ||--o{ DAILY_RECONCILIATION : closes
+    STORE ||--o{ AUDIT_LOG : owns
     SELLER o|--o{ DAILY_SALES : scoped_to
     SELLER o|--o{ DAILY_RECONCILIATION : scoped_to
     DAILY_SALES ||--|| DAILY_RECONCILIATION : reconciled_by
@@ -266,13 +271,18 @@ GitHub Actions chạy backend integration tests và frontend lint/build trên m�
 - [Ghi chú thiết kế và chuẩn bị phỏng vấn](docs/tamlottery-interview-notes.md)
 - [Kịch bản demo 2–3 phút](docs/demo-script.md)
 - [Postman collection](docs/postman/TamLottery.postman_collection.json)
+- [Production operations runbook](docs/operations-runbook.md)
+
+## Audit log
+
+`GET /api/v1/audit-logs` dành cho `OWNER` và `MANAGER`, tự giới hạn theo store trong JWT. API hỗ trợ lọc theo `action`, `entityType`, `entityId`, `actorUserId`, `fromTime`, `toTime` và pagination.
+
+Audit được ghi cùng transaction với thay đổi nghiệp vụ. Bảng không có API sửa/xóa, entity là immutable và production application user chỉ được cấp `SELECT/INSERT` trên `audit_log`. Password, JWT và refresh token không được đưa vào snapshot.
 
 ## Roadmap sau MVP
 
 - Lottery result và quy trình trả thưởng.
-- Audit log đầy đủ.
 - Export Excel/PDF.
-- Monitoring, backup và cảnh báo.
 - CI/CD deployment.
 
 ## Release
