@@ -7,6 +7,7 @@ import com.mtriet.tamlottery.reconciliation.domain.DailySalesStatus;
 import com.mtriet.tamlottery.reconciliation.domain.ReconciliationStatus;
 import com.mtriet.tamlottery.reconciliation.domain.SalesScope;
 import jakarta.validation.constraints.NotNull;
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Size;
 
 import java.time.Instant;
@@ -33,6 +34,8 @@ public final class ReconciliationDtos {
             LocalDate businessDate,
             SalesScope scope,
             Long sellerId,
+            Long reconciliationId,
+            ReconciliationStatus reconciliationStatus,
             long totalBaseQuantity,
             long totalReturnedQuantity,
             long totalLostQuantity,
@@ -62,6 +65,10 @@ public final class ReconciliationDtos {
             @Size(max = 500) String note) {
     }
 
+    public record RejectRequest(
+            @NotBlank @Size(max = 500) String reason) {
+    }
+
     public record ReconciliationResponse(
             Long id,
             Long dailySalesId,
@@ -75,6 +82,9 @@ public final class ReconciliationDtos {
             ReconciliationStatus status,
             String note,
             Instant closedAt,
+            String rejectionReason,
+            Long reviewedBy,
+            Instant reviewedAt,
             List<Long> cashTransactionIds) {
     }
 

@@ -1,0 +1,23 @@
+CREATE TABLE audit_log (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    store_id BIGINT NOT NULL,
+    actor_user_id BIGINT NOT NULL,
+    actor_username VARCHAR(80) NOT NULL,
+    actor_roles VARCHAR(100) NOT NULL,
+    action VARCHAR(60) NOT NULL,
+    entity_type VARCHAR(40) NOT NULL,
+    entity_id VARCHAR(100) NOT NULL,
+    business_date DATE NULL,
+    reason VARCHAR(500) NULL,
+    before_state LONGTEXT NULL,
+    after_state LONGTEXT NULL,
+    request_id VARCHAR(64) NULL,
+    ip_address VARCHAR(45) NULL,
+    occurred_at DATETIME(6) NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT fk_audit_log_store FOREIGN KEY (store_id) REFERENCES store (id),
+    INDEX idx_audit_store_occurred (store_id, occurred_at),
+    INDEX idx_audit_store_action (store_id, action, occurred_at),
+    INDEX idx_audit_store_entity (store_id, entity_type, entity_id, occurred_at),
+    INDEX idx_audit_store_actor (store_id, actor_user_id, occurred_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

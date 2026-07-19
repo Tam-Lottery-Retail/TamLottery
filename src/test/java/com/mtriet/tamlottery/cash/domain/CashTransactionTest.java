@@ -20,6 +20,19 @@ class CashTransactionTest {
                 .isZero();
     }
 
+    @Test
+    void recordsReasonActorAndTimeWhenVoided() {
+        CashTransaction transaction = transaction(CashDirection.IN, CashTransactionType.SALES_COLLECTION, 500_000);
+        Instant voidedAt = Instant.parse("2026-07-17T11:00:00Z");
+
+        transaction.voidTransaction("Nhập sai số tiền", 7L, voidedAt);
+
+        assertThat(transaction.getStatus()).isEqualTo(CashTransactionStatus.VOID);
+        assertThat(transaction.getVoidReason()).isEqualTo("Nhập sai số tiền");
+        assertThat(transaction.getVoidedBy()).isEqualTo(7L);
+        assertThat(transaction.getVoidedAt()).isEqualTo(voidedAt);
+    }
+
     private static CashTransaction transaction(CashDirection direction, CashTransactionType type, long amount) {
         return new CashTransaction(
                 new Store("TAM-01", "Tam Lottery"),

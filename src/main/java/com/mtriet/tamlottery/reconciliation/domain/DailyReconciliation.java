@@ -78,6 +78,9 @@ public class DailyReconciliation extends BaseEntity {
     @Column(name = "reviewed_at")
     private Instant reviewedAt;
 
+    @Column(name = "rejection_reason", length = 500)
+    private String rejectionReason;
+
     protected DailyReconciliation() {
     }
 
@@ -122,8 +125,9 @@ public class DailyReconciliation extends BaseEntity {
         this.closedAt = now;
     }
 
-    public void reject(Long ownerId, Instant now) {
+    public void reject(String reason, Long ownerId, Instant now) {
         this.status = ReconciliationStatus.REJECTED;
+        this.rejectionReason = reason;
         this.reviewedBy = ownerId;
         this.reviewedAt = now;
     }
@@ -178,5 +182,17 @@ public class DailyReconciliation extends BaseEntity {
 
     public Instant getClosedAt() {
         return closedAt;
+    }
+
+    public Long getReviewedBy() {
+        return reviewedBy;
+    }
+
+    public Instant getReviewedAt() {
+        return reviewedAt;
+    }
+
+    public String getRejectionReason() {
+        return rejectionReason;
     }
 }

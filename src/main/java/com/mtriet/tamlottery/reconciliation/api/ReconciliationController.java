@@ -52,8 +52,10 @@ public class ReconciliationController {
 
     @PostMapping("/reconciliations/{id}/reject")
     @PreAuthorize("hasRole('OWNER')")
-    ReconciliationDtos.ReconciliationResponse reject(@PathVariable Long id) {
-        return reconciliationService.reject(id);
+    ReconciliationDtos.ReconciliationResponse reject(
+            @PathVariable Long id,
+            @Valid @RequestBody ReconciliationDtos.RejectRequest request) {
+        return reconciliationService.reject(id, request);
     }
 
     @GetMapping("/daily-sales")

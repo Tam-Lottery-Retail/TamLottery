@@ -11,11 +11,16 @@ import jakarta.persistence.Enumerated;
 import jakarta.persistence.FetchType;
 import jakarta.persistence.JoinColumn;
 import jakarta.persistence.ManyToOne;
+import jakarta.persistence.OneToMany;
+import jakarta.persistence.OrderBy;
 import jakarta.persistence.Table;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.EnumSet;
+import java.util.List;
 
 @Entity
 @Table(name = "cash_transaction")
@@ -73,6 +78,19 @@ public class CashTransaction extends BaseEntity {
     @Column(name = "posted_at")
     private Instant postedAt;
 
+    @Column(name = "void_reason", length = 500)
+    private String voidReason;
+
+    @Column(name = "voided_by")
+    private Long voidedBy;
+
+    @Column(name = "voided_at")
+    private Instant voidedAt;
+
+    @OneToMany(mappedBy = "cashTransaction", cascade = jakarta.persistence.CascadeType.ALL, orphanRemoval = true)
+    @OrderBy("id asc")
+    private List<CashTransactionSource> sources = new ArrayList<>();
+
     protected CashTransaction() {
     }
 
@@ -105,12 +123,20 @@ public class CashTransaction extends BaseEntity {
         this.postedAt = now;
     }
 
-    public void voidTransaction() {
+    public void voidTransaction(String reason, Long userId, Instant now) {
         this.status = CashTransactionStatus.VOID;
+        this.voidReason = reason;
+        this.voidedBy = userId;
+        this.voidedAt = now;
     }
 
     public void assignTo(DailyReconciliation reconciliation) {
         this.reconciliation = reconciliation;
+    }
+
+    public void addSource(CashTransactionSource source) {
+        source.attachTo(this);
+        sources.add(source);
     }
 
     public void unassign() {
@@ -171,5 +197,20 @@ public class CashTransaction extends BaseEntity {
     public Instant getPostedAt() {
         return postedAt;
     }
-}
 
+    public String getVoidReason() {
+        return voidReason;
+    }
+
+    public Long getVoidedBy() {
+        return voidedBy;
+    }
+
+    public Instant getVoidedAt() {
+        return voidedAt;
+    }
+
+    public List<CashTransactionSource> getSources() {
+        return Collections.unmodifiableList(sources);
+    }
+}

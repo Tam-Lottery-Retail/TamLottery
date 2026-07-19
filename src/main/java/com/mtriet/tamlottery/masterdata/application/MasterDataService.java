@@ -1,5 +1,8 @@
 package com.mtriet.tamlottery.masterdata.application;
 
+import com.mtriet.tamlottery.audit.application.AuditService;
+import com.mtriet.tamlottery.audit.domain.AuditAction;
+import com.mtriet.tamlottery.audit.domain.AuditEntityType;
 import com.mtriet.tamlottery.common.exception.BusinessException;
 import com.mtriet.tamlottery.common.exception.ErrorCode;
 import com.mtriet.tamlottery.identity.domain.Store;
@@ -22,26 +25,34 @@ public class MasterDataService {
     private final LotteryDrawRepository drawRepository;
     private final StoreRepository storeRepository;
     private final CurrentUserProvider currentUserProvider;
+    private final AuditService auditService;
 
     public MasterDataService(AgencyRepository agencyRepository,
                              LotteryDrawRepository drawRepository,
                              StoreRepository storeRepository,
-                             CurrentUserProvider currentUserProvider) {
+                             CurrentUserProvider currentUserProvider,
+                             AuditService auditService) {
         this.agencyRepository = agencyRepository;
         this.drawRepository = drawRepository;
         this.storeRepository = storeRepository;
         this.currentUserProvider = currentUserProvider;
+        this.auditService = auditService;
     }
 
     @Transactional
     public MasterDataDtos.AgencyResponse createAgency(MasterDataDtos.CreateAgencyRequest request) {
-        Long storeId = currentUserProvider.get().storeId();
+        var current = currentUserProvider.get();
+        Long storeId = current.storeId();
         if (agencyRepository.existsByStoreIdAndCodeIgnoreCase(storeId, request.code())) {
             throw BusinessException.conflict(ErrorCode.DUPLICATE_RESOURCE, "Agency code already exists");
         }
         Store store = storeRepository.getReferenceById(storeId);
-        return toAgencyResponse(agencyRepository.save(new Agency(
-                store, request.code(), request.name(), request.contactName(), request.phone())));
+        Agency agency = agencyRepository.save(new Agency(
+                store, request.code(), request.name(), request.contactName(), request.phone()));
+        MasterDataDtos.AgencyResponse response = toAgencyResponse(agency);
+        auditService.record(current, AuditAction.AGENCY_CREATED, AuditEntityType.AGENCY,
+                agency.getId(), null, null, null, response);
+        return response;
     }
 
     @Transactional(readOnly = true)
@@ -51,10 +62,15 @@ public class MasterDataService {
 
     @Transactional
     public MasterDataDtos.AgencyResponse changeAgencyStatus(Long id, MasterDataDtos.ChangeAgencyStatusRequest request) {
-        Agency agency = agencyRepository.findByIdAndStoreId(id, currentUserProvider.get().storeId())
+        var current = currentUserProvider.get();
+        Agency agency = agencyRepository.findByIdAndStoreId(id, current.storeId())
                 .orElseThrow(() -> BusinessException.notFound("Agency not found"));
+        MasterDataDtos.AgencyResponse before = toAgencyResponse(agency);
         agency.changeActive(request.active());
-        return toAgencyResponse(agency);
+        MasterDataDtos.AgencyResponse after = toAgencyResponse(agency);
+        auditService.record(current, AuditAction.AGENCY_STATUS_CHANGED, AuditEntityType.AGENCY,
+                agency.getId(), null, request.active() ? "ACTIVATED" : "DEACTIVATED", before, after);
+        return after;
     }
 
     @Transactional(readOnly = true)

@@ -1,5 +1,8 @@
 package com.mtriet.tamlottery.reconciliation.application;
 
+import com.mtriet.tamlottery.audit.application.AuditService;
+import com.mtriet.tamlottery.audit.domain.AuditAction;
+import com.mtriet.tamlottery.audit.domain.AuditEntityType;
 import com.mtriet.tamlottery.cash.domain.CashTransaction;
 import com.mtriet.tamlottery.cash.domain.CashTransactionStatus;
 import com.mtriet.tamlottery.cash.infrastructure.CashTransactionRepository;
@@ -62,6 +65,7 @@ public class ReconciliationService {
     private final LotteryBatchRepository batchRepository;
     private final InventoryAdjustmentRepository adjustmentRepository;
     private final CurrentUserProvider currentUserProvider;
+    private final AuditService auditService;
 
     public ReconciliationService(DailySalesRepository salesRepository,
                                  DailyReconciliationRepository reconciliationRepository,
@@ -73,7 +77,8 @@ public class ReconciliationService {
                                  TicketAllocationLineRepository allocationLineRepository,
                                  LotteryBatchRepository batchRepository,
                                  InventoryAdjustmentRepository adjustmentRepository,
-                                 CurrentUserProvider currentUserProvider) {
+                                 CurrentUserProvider currentUserProvider,
+                                 AuditService auditService) {
         this.salesRepository = salesRepository;
         this.reconciliationRepository = reconciliationRepository;
         this.calculationService = calculationService;
@@ -85,6 +90,7 @@ public class ReconciliationService {
         this.batchRepository = batchRepository;
         this.adjustmentRepository = adjustmentRepository;
         this.currentUserProvider = currentUserProvider;
+        this.auditService = auditService;
     }
 
     @Transactional(readOnly = true)
@@ -94,6 +100,13 @@ public class ReconciliationService {
         enforceSellerAccess(current, scope, sellerId);
         if (scope == SalesScope.SELLER) {
             requireSeller(sellerId, current.storeId());
+        }
+        String scopeKey = scopeKey(scope, sellerId);
+        var activeReconciliation = reconciliationRepository
+                .findFirstByStoreIdAndBusinessDateAndScopeKeyAndStatusInOrderByRevisionDesc(
+                        current.storeId(), businessDate, scopeKey, ACTIVE_RECONCILIATION_STATUSES);
+        if (activeReconciliation.isPresent()) {
+            return toPreview(activeReconciliation.get());
         }
         SalesCalculationService.Calculation calculation = calculationService.calculate(
                 current.storeId(), businessDate, scope, sellerId, false);
@@ -156,7 +169,10 @@ public class ReconciliationService {
                 now));
         calculation.attachableCash().forEach(cash -> cash.assignTo(reconciliation));
         freezeInventory(current.storeId(), request.businessDate(), request.scope(), request.sellerId());
-        return toReconciliationResponse(reconciliation);
+        ReconciliationDtos.ReconciliationResponse response = toReconciliationResponse(reconciliation);
+        auditService.record(current, AuditAction.RECONCILIATION_CLOSED, AuditEntityType.DAILY_RECONCILIATION,
+                reconciliation.getId(), reconciliation.getBusinessDate(), reconciliation.getNote(), null, response);
+        return response;
     }
 
     @Transactional
@@ -167,23 +183,43 @@ public class ReconciliationService {
         if (reconciliation.getStatus() != ReconciliationStatus.REVIEW_REQUIRED) {
             throw BusinessException.conflict(ErrorCode.INVALID_STATE, "Only a reconciliation requiring review can be approved");
         }
+        ReconciliationDtos.ReconciliationResponse before = toReconciliationResponse(reconciliation);
         reconciliation.approve(current.userId(), Instant.now());
-        return toReconciliationResponse(reconciliation);
+        ReconciliationDtos.ReconciliationResponse after = toReconciliationResponse(reconciliation);
+        auditService.record(current, AuditAction.RECONCILIATION_APPROVED, AuditEntityType.DAILY_RECONCILIATION,
+                reconciliation.getId(), reconciliation.getBusinessDate(), reconciliation.getNote(), before, after);
+        return after;
     }
 
     @Transactional
-    public ReconciliationDtos.ReconciliationResponse reject(Long id) {
+    public ReconciliationDtos.ReconciliationResponse reject(Long id, ReconciliationDtos.RejectRequest request) {
         CurrentUser current = currentUserProvider.get();
+        String reason = requireRejectionReason(request == null ? null : request.reason());
         DailyReconciliation reconciliation = reconciliationRepository.findForUpdate(id, current.storeId())
                 .orElseThrow(() -> BusinessException.notFound("Reconciliation not found"));
         if (reconciliation.getStatus() != ReconciliationStatus.REVIEW_REQUIRED) {
             throw BusinessException.conflict(ErrorCode.INVALID_STATE, "Only a reconciliation requiring review can be rejected");
         }
-        reconciliation.reject(current.userId(), Instant.now());
+        ReconciliationDtos.ReconciliationResponse before = toReconciliationResponse(reconciliation);
+        reconciliation.reject(reason, current.userId(), Instant.now());
         reconciliation.getDailySales().voidSnapshot();
         cashRepository.findAllByReconciliationId(reconciliation.getId()).forEach(CashTransaction::unassign);
         reopenInventory(current.storeId(), reconciliation);
-        return toReconciliationResponse(reconciliation);
+        ReconciliationDtos.ReconciliationResponse after = toReconciliationResponse(reconciliation);
+        auditService.record(current, AuditAction.RECONCILIATION_REJECTED, AuditEntityType.DAILY_RECONCILIATION,
+                reconciliation.getId(), reconciliation.getBusinessDate(), reason, before, after);
+        return after;
+    }
+
+    private String requireRejectionReason(String reason) {
+        if (reason == null || reason.isBlank()) {
+            throw BusinessException.invalid(ErrorCode.INVALID_REQUEST, "A reason is required to reject a reconciliation");
+        }
+        String normalized = reason.trim();
+        if (normalized.length() > 500) {
+            throw BusinessException.invalid(ErrorCode.INVALID_REQUEST, "Reconciliation rejection reason must not exceed 500 characters");
+        }
+        return normalized;
     }
 
     @Transactional(readOnly = true)
@@ -320,6 +356,8 @@ public class ReconciliationService {
                 date,
                 scope,
                 sellerId,
+                null,
+                null,
                 calculation.totalBaseQuantity(),
                 calculation.totalReturnedQuantity(),
                 calculation.totalLostQuantity(),
@@ -339,6 +377,48 @@ public class ReconciliationService {
                         cash.getOccurredAt())).toList());
     }
 
+    private ReconciliationDtos.PreviewResponse toPreview(DailyReconciliation reconciliation) {
+        DailySales sales = reconciliation.getDailySales();
+        long sellerReconciliationAmount = reconciliation.getScope() == SalesScope.STORE
+                ? reconciliationRepository.findAllByStoreIdAndBusinessDateAndScopeAndStatus(
+                        reconciliation.getStore().getId(),
+                        reconciliation.getBusinessDate(),
+                        SalesScope.SELLER,
+                        ReconciliationStatus.CLOSED)
+                .stream()
+                .mapToLong(DailyReconciliation::getActualReceivedAmount)
+                .reduce(0, Math::addExact)
+                : 0;
+        List<CashTransaction> attachedCash = cashRepository.findAllByReconciliationId(reconciliation.getId());
+        return new ReconciliationDtos.PreviewResponse(
+                reconciliation.getBusinessDate(),
+                reconciliation.getScope(),
+                reconciliation.getSeller() == null ? null : reconciliation.getSeller().getId(),
+                reconciliation.getId(),
+                reconciliation.getStatus(),
+                sales.getTotalBaseQuantity(),
+                sales.getTotalReturnedQuantity(),
+                sales.getTotalLostQuantity(),
+                sales.getTotalSoldQuantity(),
+                reconciliation.getExpectedAmount(),
+                reconciliation.getActualReceivedAmount(),
+                sellerReconciliationAmount,
+                reconciliation.getDifferenceAmount(),
+                sales.getLines().stream().map(this::toLineResponse).toList(),
+                attachedCash.stream().map(this::toCashResponse).toList());
+    }
+
+    private ReconciliationDtos.ReconciliationCashResponse toCashResponse(CashTransaction cash) {
+        return new ReconciliationDtos.ReconciliationCashResponse(
+                cash.getId(),
+                cash.getSeller() == null ? null : cash.getSeller().getId(),
+                cash.getDirection(),
+                cash.getTransactionType(),
+                cash.getPaymentMethod(),
+                cash.getAmount(),
+                cash.getOccurredAt());
+    }
+
     private ReconciliationDtos.SalesLineResponse toLineResponse(SalesCalculationService.Line line) {
         return new ReconciliationDtos.SalesLineResponse(
                 line.batchLine().getId(),
@@ -350,6 +430,19 @@ public class ReconciliationService {
                 line.soldQuantity(),
                 line.unitSalePrice(),
                 line.expectedAmount());
+    }
+
+    private ReconciliationDtos.SalesLineResponse toLineResponse(DailySalesLine line) {
+        return new ReconciliationDtos.SalesLineResponse(
+                line.getBatchLine().getId(),
+                line.getBatchLine().getDraw().getProvinceCode(),
+                line.getBatchLine().getDraw().getDrawDate(),
+                line.getBaseQuantity(),
+                line.getReturnedQuantity(),
+                line.getLostQuantity(),
+                line.getSoldQuantity(),
+                line.getUnitSalePrice(),
+                line.getExpectedAmount());
     }
 
     private ReconciliationDtos.ReconciliationResponse toReconciliationResponse(DailyReconciliation reconciliation) {
@@ -366,6 +459,9 @@ public class ReconciliationService {
                 reconciliation.getStatus(),
                 reconciliation.getNote(),
                 reconciliation.getClosedAt(),
+                reconciliation.getRejectionReason(),
+                reconciliation.getReviewedBy(),
+                reconciliation.getReviewedAt(),
                 cashRepository.findAllByReconciliationId(reconciliation.getId()).stream()
                         .map(CashTransaction::getId)
                         .toList());

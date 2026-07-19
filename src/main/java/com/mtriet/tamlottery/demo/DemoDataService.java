@@ -183,7 +183,8 @@ public class DemoDataService {
                         PaymentMethod.CASH,
                         680_000,
                         now,
-                        "Seller giao đủ tiền cho 68 vé bán"));
+                        "Seller giao đủ tiền cho 68 vé bán",
+                        List.of(new CashDtos.CashSourceRequest(allocationLineId, 680_000))));
         cashService.post(cash.id());
     }
 
